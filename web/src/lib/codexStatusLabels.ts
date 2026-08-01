@@ -6,8 +6,9 @@ export function formatCompactCodexReasoningLabel(effort?: string | null): string
     return normalized
 }
 
-export function formatCodexReasoningLabel(effort?: string | null): string {
-    return `reasoning ${formatCompactCodexReasoningLabel(effort)}`
+export function formatCodexReasoningLabel(effort?: string | null, showLabel = true): string {
+    const value = formatCompactCodexReasoningLabel(effort)
+    return showLabel ? `reasoning ${value}` : value
 }
 
 export function shouldShowCodexReasoningLabel(agentFlavor: string | null | undefined): boolean {

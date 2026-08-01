@@ -18,6 +18,11 @@ describe('codexStatusLabels', () => {
         expect(formatCodexReasoningLabel('Ultra')).toBe('reasoning ultra')
     })
 
+    it('can omit the reasoning field label', () => {
+        expect(formatCodexReasoningLabel('xhigh', false)).toBe('xhigh')
+        expect(formatCodexReasoningLabel(null, false)).toBe('default')
+    })
+
     it('formats compact effort-only labels', () => {
         expect(formatCompactCodexReasoningLabel(null)).toBe('default')
         expect(formatCompactCodexReasoningLabel('default')).toBe('default')

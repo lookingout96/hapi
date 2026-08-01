@@ -18,6 +18,7 @@ import {
 } from '@/lib/codexStatusLabels'
 import { isFastServiceTier } from './codexFastMode'
 import { useTranslation } from '@/lib/use-translation'
+import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
 
 // Vibing messages for thinking state
 const VIBING_MESSAGES = [
@@ -205,6 +206,7 @@ export function StatusBar(props: {
     voiceStatus?: ConversationStatus
 }) {
     const { t } = useTranslation()
+    const { preferences: headerMetadata } = useSessionHeaderMetadata()
     const connectionStatus = useMemo(
         () => getConnectionStatus(props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount ?? 0, t),
         [props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount, t]
@@ -254,7 +256,7 @@ export function StatusBar(props: {
         : null
     const displaysCodexReasoning = shouldShowCodexReasoningLabel(props.agentFlavor)
     const codexReasoningLabel = displaysCodexReasoning
-        ? formatCodexReasoningLabel(props.modelReasoningEffort)
+        ? formatCodexReasoningLabel(props.modelReasoningEffort, headerMetadata.showLabels)
         : null
     const compactCodexReasoningLabel = displaysCodexReasoning
         ? formatCompactCodexReasoningLabel(props.modelReasoningEffort)
