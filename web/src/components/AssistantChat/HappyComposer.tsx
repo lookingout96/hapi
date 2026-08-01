@@ -156,6 +156,8 @@ export function HappyComposer(props: {
     contextSize?: number
     contextCacheRead?: number
     contextWindow?: number | null
+    /** Model for the context-window heuristic; see StatusBar.contextModel. */
+    contextModel?: string | null
     controlledByUser?: boolean
     agentFlavor?: string | null
     availableModelOptions?: Array<{ value: string | null; label: string }>
@@ -229,6 +231,7 @@ export function HappyComposer(props: {
         contextSize,
         contextCacheRead,
         contextWindow,
+        contextModel,
         controlledByUser = false,
         agentFlavor,
         availableModelOptions,
@@ -1330,6 +1333,7 @@ export function HappyComposer(props: {
                         contextSize={contextSize}
                         contextCacheRead={contextCacheRead}
                         contextWindow={contextWindow}
+                        contextModel={contextModel}
                         model={model}
                         modelReasoningEffort={modelReasoningEffort}
                         serviceTier={serviceTier}

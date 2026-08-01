@@ -196,6 +196,13 @@ export function StatusBar(props: {
     contextSize?: number
     contextCacheRead?: number
     contextWindow?: number | null
+    /**
+     * Model to use for the context-window fallback heuristic when
+     * contextWindow is absent. Falls back to `model`. Callers pass the
+     * usage-bearing message's own model here so local Claude sessions (whose
+     * session.model is often null) still resolve a plausible window.
+     */
+    contextModel?: string | null
     model?: string | null
     modelReasoningEffort?: string | null
     serviceTier?: string | null
@@ -212,30 +219,31 @@ export function StatusBar(props: {
         [props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount, t]
     )
 
+    const contextHeuristicModel = props.contextModel ?? props.model
     const contextWarning = useMemo(
         () => {
             if (props.contextSize === undefined) return null
-            const maxContextSize = props.contextWindow ?? getContextBudgetTokens(props.model, props.agentFlavor)
+            const maxContextSize = props.contextWindow ?? getContextBudgetTokens(contextHeuristicModel, props.agentFlavor)
             if (!maxContextSize) return null
             return getContextWarning(props.contextSize, maxContextSize)
         },
-        [props.contextSize, props.contextWindow, props.model, props.agentFlavor]
+        [props.contextSize, props.contextWindow, contextHeuristicModel, props.agentFlavor]
     )
     const contextUsageLabel = useMemo(() => {
         if (props.contextSize === undefined) return null
-        const maxContextSize = props.contextWindow ?? getContextBudgetTokens(props.model, props.agentFlavor)
+        const maxContextSize = props.contextWindow ?? getContextBudgetTokens(contextHeuristicModel, props.agentFlavor)
         return formatContextUsageLabel(props.contextSize, maxContextSize)
-    }, [props.contextSize, props.contextWindow, props.model, props.agentFlavor])
+    }, [props.contextSize, props.contextWindow, contextHeuristicModel, props.agentFlavor])
     const compactContextUsageLabel = useMemo(() => {
         if (props.contextSize === undefined) return null
-        const maxContextSize = props.contextWindow ?? getContextBudgetTokens(props.model, props.agentFlavor)
+        const maxContextSize = props.contextWindow ?? getContextBudgetTokens(contextHeuristicModel, props.agentFlavor)
         return formatCompactContextUsageLabel(props.contextSize, maxContextSize)
-    }, [props.contextSize, props.contextWindow, props.model, props.agentFlavor])
+    }, [props.contextSize, props.contextWindow, contextHeuristicModel, props.agentFlavor])
     const contextUsageDetails = useMemo(() => {
         if (props.contextSize === undefined) return null
-        const maxContextSize = props.contextWindow ?? getContextBudgetTokens(props.model, props.agentFlavor)
+        const maxContextSize = props.contextWindow ?? getContextBudgetTokens(contextHeuristicModel, props.agentFlavor)
         return getContextUsageDetails(props.contextSize, maxContextSize, props.contextCacheRead)
-    }, [props.contextSize, props.contextCacheRead, props.contextWindow, props.model, props.agentFlavor])
+    }, [props.contextSize, props.contextCacheRead, props.contextWindow, contextHeuristicModel, props.agentFlavor])
     const contextUsedPercentage = contextUsageDetails?.usedPercentage ?? null
 
     const permissionMode = props.permissionMode
