@@ -21,6 +21,7 @@ import { PermissionModeSchema } from '@hapi/protocol/schemas';
 import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { normalizeClaudeSessionModel } from './model';
 import { normalizeClaudeSessionEffort } from './effort';
+import { normalizeHookPermissionMode } from './utils/hookPermissionMode';
 import { getInvokedCwd } from '@/utils/invokedCwd';
 
 export interface StartOptions {
@@ -118,6 +119,27 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
                     currentSession.onSessionFound(sessionId);
                 }
             }
+
+            // Inherit the mode the user picked inside the interactive TUI
+            // (shift+tab) so a later local→remote switch keeps it. Only the
+            // local settings file registers the hooks that carry
+            // permission_mode, but gate on local mode anyway so a remote SDK
+            // process can never fight with web/RPC-driven state.
+            const hookPermissionMode = normalizeHookPermissionMode(data.permission_mode);
+            if (
+                hookPermissionMode
+                && currentSession?.mode === 'local'
+                && hookPermissionMode !== currentPermissionMode
+            ) {
+                logger.debug(`[START] Inheriting permission mode from local Claude: ${currentPermissionMode} -> ${hookPermissionMode}`);
+                currentPermissionMode = hookPermissionMode;
+                syncSessionModes();
+                currentSession.pushKeepAlive();
+                session.sendSessionEvent({
+                    type: 'permission-mode-changed',
+                    mode: hookPermissionMode
+                });
+            }
         }
     });
     logger.debug(`[START] Hook server started on port ${hookServer.port}`);
@@ -126,7 +148,18 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
         filenamePrefix: 'session-hook',
         logLabel: 'generateHookSettings'
     });
-    logger.debug(`[START] Generated hook settings file: ${hookSettingsPath}`);
+    // The interactive TUI gets a separate settings file that also forwards
+    // UserPromptSubmit/PreToolUse (their payloads carry permission_mode), so a
+    // mode picked via shift+tab is inherited on local→remote switch. The
+    // remote SDK process keeps the SessionStart-only file: these extra hooks
+    // block Claude per prompt/tool call, and remote mode state is owned by the
+    // hub/RPC path.
+    const localHookSettingsPath = generateHookSettingsFile(hookServer.port, hookServer.token, {
+        filenamePrefix: 'session-hook-local',
+        logLabel: 'generateHookSettings',
+        trackPermissionMode: true
+    });
+    logger.debug(`[START] Generated hook settings files: ${hookSettingsPath}, ${localHookSettingsPath}`);
 
     // Print log file path
     const logPath = logger.logFilePath;
@@ -141,6 +174,7 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             happyServer.stop();
             hookServer.stop();
             cleanupHookSettingsFile(hookSettingsPath, 'generateHookSettings');
+            cleanupHookSettingsFile(localHookSettingsPath, 'generateHookSettings');
         }
     });
 
@@ -437,7 +471,8 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             claudeArgs: options.claudeArgs,
             startedBy,
             resumeSessionId: options.resumeSessionId,
-            hookSettingsPath
+            hookSettingsPath,
+            localHookSettingsPath
         });
     } catch (error) {
         loopError = error;
