@@ -1,0 +1,1158 @@
+import { EventEmitter } from 'node:events'
+import { randomUUID } from 'node:crypto'
+import { io, type Socket } from 'socket.io-client'
+import axios from 'axios'
+import type { ZodType } from 'zod'
+import { logger } from '@/ui/logger'
+import { backoff } from '@/utils/time'
+import { apiValidationError } from '@/utils/errorUtils'
+import { AsyncLock } from '@/utils/lock'
+import type { RawJSONLines } from '@/claude/types'
+import { configuration } from '@/configuration'
+import { AGENT_MESSAGE_PAYLOAD_TYPE } from "@hapi/protocol"
+import type { SessionEndReason } from '@hapi/protocol'
+import type { ClientToServerEvents, ServerToClientEvents, Update } from '@hapi/protocol'
+import {
+    TerminalClosePayloadSchema,
+    TerminalOpenPayloadSchema,
+    TerminalResizePayloadSchema,
+    TerminalWritePayloadSchema
+} from '@hapi/protocol'
+import type {
+    AgentState,
+    MessageContent,
+    MessageMeta,
+    Metadata,
+    SessionCollaborationMode,
+    Session,
+    SessionModel,
+    SessionPermissionMode,
+    UserMessage
+} from './types'
+import { AgentStateSchema, CliMessagesResponseSchema, MetadataSchema, UserMessageSchema } from './types'
+import { RpcHandlerManager } from './rpc/RpcHandlerManager'
+import { registerCommonHandlers } from '../modules/common/registerCommonHandlers'
+import { cleanupUploadDir } from '../modules/common/handlers/uploads'
+import { TerminalManager } from '@/terminal/TerminalManager'
+import { applyVersionedAck } from './versionedUpdate'
+import { buildHubRequestHeaders, buildSocketIoExtraHeaderOptions } from './hubExtraHeaders'
+
+/**
+ * XML tags that Claude Code injects as `type:'user'` messages.
+ * These are internal bookkeeping, not text the human actually typed.
+ */
+const SYSTEM_INJECTION_PREFIXES = [
+    '<task-notification>',
+    '<command-name>',
+    '<local-command-caveat>',
+    '<system-reminder>',
+]
+
+function extractRawUserTextContent(content: unknown): string | null {
+    if (typeof content === 'string') {
+        return content
+    }
+
+    if (!Array.isArray(content)) {
+        return null
+    }
+
+    const parts = content
+        .map((block) => {
+            if (!block || typeof block !== 'object' || Array.isArray(block)) return null
+            const record = block as Record<string, unknown>
+            return record.type === 'text' && typeof record.text === 'string'
+                ? record.text
+                : null
+        })
+        .filter((text): text is string => text !== null)
+
+    return parts.length > 0 ? parts.join('\n') : null
+}
+
+/**
+ * Returns true if a JSONL message should be classified as a user-role message
+ * (i.e., text typed by a real human) rather than an agent-role message.
+ *
+ * Claude Code injects system messages (task notifications, command caveats, …)
+ * into the JSONL log as `type:'user'` entries so the model sees them in
+ * context.  All metadata fields (`userType`, `isMeta`, …) are identical to
+ * genuine user messages, so the only reliable signal is the message content
+ * itself: injected messages always start with a well-known XML tag.
+ */
+export function isExternalUserMessage(body: RawJSONLines): body is Extract<RawJSONLines, { type: 'user' }> {
+    if (body.type !== 'user') return false
+    const text = extractRawUserTextContent(body.message.content)
+    if (text === null) return false
+    if (body.isSidechain === true) return false
+    if (body.isMeta === true) return false
+
+    const trimmed = text.trimStart()
+    for (const prefix of SYSTEM_INJECTION_PREFIXES) {
+        if (trimmed.startsWith(prefix)) return false
+    }
+    return true
+}
+
+/**
+ * Dedup filter for messages arriving on the realtime socket and via reconnect
+ * backfill.  Keyed by message id (with a bounded LRU) and falls back to the
+ * legacy seq cursor for messages that lack an id.
+ *
+ * Why id-first: scheduled messages keep the seq assigned at insertion time, so
+ * a row scheduled for T+1h (seq=10) can be released after a later immediate
+ * message (seq=11) has already advanced the cursor.  A pure seq <= cursor
+ * filter would silently drop the mature emit.  See HAPI Bot R3 finding #1.
+ */
+export class IncomingMessageFilter {
+    private readonly seenIds = new Set<string>()
+    private readonly capacity: number
+    private lastSeenSeq: number | null = null
+
+    constructor(capacity = 256) {
+        this.capacity = capacity
+    }
+
+    cursorSeq(): number | null {
+        return this.lastSeenSeq
+    }
+
+    /** Returns true if this message should be processed; false to drop as a duplicate. */
+    accept(message: { id?: string | null; seq?: number | null }): boolean {
+        const id = typeof message.id === 'string' && message.id.length > 0 ? message.id : null
+        if (id && this.seenIds.has(id)) {
+            // Refresh recency: the hub re-emits the same id every 5 s until the
+            // CLI acks (releaseMatureScheduledMessages contract).  Without a
+            // delete+re-add the entry stays at its first-insert position and can
+            // be evicted by a burst of unrelated ids before the ack lands —
+            // the next re-emit would then be treated as new and double-deliver.
+            this.seenIds.delete(id)
+            this.seenIds.add(id)
+            return false
+        }
+
+        const seq = typeof message.seq === 'number' ? message.seq : null
+        if (!id && seq !== null && this.lastSeenSeq !== null && seq <= this.lastSeenSeq) {
+            return false
+        }
+
+        if (id) {
+            this.seenIds.add(id)
+            if (this.seenIds.size > this.capacity) {
+                // Set iteration is insertion-ordered; with delete+re-add on dedup hit
+                // (above) this becomes a true LRU eviction.
+                const oldest = this.seenIds.values().next().value
+                if (oldest !== undefined) this.seenIds.delete(oldest)
+            }
+        }
+        if (seq !== null) {
+            this.lastSeenSeq = Math.max(this.lastSeenSeq ?? 0, seq)
+        }
+        return true
+    }
+}
+
+export type ApiSessionClientState = 'pending' | 'materializing' | 'active' | 'closed'
+
+export type PendingSessionSnapshot = {
+    metadata: Metadata | null
+    agentState: AgentState | null
+}
+
+export type ApiSessionClientOptions = {
+    materialize?: (snapshot: PendingSessionSnapshot, signal: AbortSignal) => Promise<Session>
+    onMaterialized?: (session: Session, snapshot: PendingSessionSnapshot) => void
+}
+
+type PendingOutboundEvent = {
+    emit: () => void
+    retention: 'lossless' | 'droppable'
+}
+
+const MAX_PENDING_DROPPABLE_EVENTS = 256
+const MATERIALIZATION_RETRY_MIN_MS = 1_000
+const MATERIALIZATION_RETRY_MAX_MS = 30_000
+
+function isTransientMaterializationError(error: unknown): boolean {
+    if (!axios.isAxiosError(error)) {
+        return false
+    }
+    if (!error.response) {
+        return true
+    }
+    const status = error.response.status
+    return status === 408 || status === 425 || status === 429 || status >= 500
+}
+
+async function waitForAbortableDelay(
+    ms: number,
+    signal: AbortSignal,
+    interruptSignal?: AbortSignal
+): Promise<boolean> {
+    if (signal.aborted || interruptSignal?.aborted) {
+        return false
+    }
+
+    return await new Promise<boolean>((resolve) => {
+        let settled = false
+        const finish = (completed: boolean) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timeout)
+            signal.removeEventListener('abort', onAbort)
+            interruptSignal?.removeEventListener('abort', onAbort)
+            resolve(completed)
+        }
+        const timeout = setTimeout(() => {
+            finish(true)
+        }, ms)
+        const onAbort = () => {
+            finish(false)
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+        interruptSignal?.addEventListener('abort', onAbort, { once: true })
+    })
+}
+
+function hasSameJsonValue(left: unknown, right: unknown): boolean {
+    return JSON.stringify(left) === JSON.stringify(right)
+}
+
+export class ApiSessionClient extends EventEmitter {
+    private readonly token: string
+    readonly sessionId: string
+    private metadata: Metadata | null
+    private metadataVersion: number
+    private agentState: AgentState | null
+    private agentStateVersion: number
+    private readonly socket: Socket<ServerToClientEvents, ClientToServerEvents>
+    private pendingMessages: { message: UserMessage; localId?: string }[] = []
+    private pendingMessageCallback: ((message: UserMessage, localId?: string) => void) | null = null
+    private cancelQueuedMessageCallback: ((localId: string) => boolean) | null = null
+    private readonly incomingFilter = new IncomingMessageFilter()
+    private backfillInFlight: Promise<void> | null = null
+    private needsBackfill = false
+    private hasConnectedOnce = false
+    readonly rpcHandlerManager: RpcHandlerManager
+    private readonly terminalManager: TerminalManager
+    private agentStateLock = new AsyncLock()
+    private metadataLock = new AsyncLock()
+    private state: ApiSessionClientState
+    private readonly materializer?: ApiSessionClientOptions['materialize']
+    private readonly onMaterialized?: ApiSessionClientOptions['onMaterialized']
+    private materializationTask: Promise<boolean> | null = null
+    private materializationAbortController: AbortController | null = null
+    private materializationRetryAbortController: AbortController | null = null
+    private materializationDrainRequested = false
+    private awaitingMaterializedConnection = false
+    private metadataChangedDuringAttempt = false
+    private agentStateChangedDuringAttempt = false
+    private readonly pendingOutboundEvents: PendingOutboundEvent[] = []
+    private didWarnPendingQueueFull = false
+
+    constructor(token: string, session: Session, options: ApiSessionClientOptions = {}) {
+        super()
+        this.token = token
+        this.sessionId = session.id
+        this.metadata = session.metadata
+        this.metadataVersion = session.metadataVersion
+        this.agentState = session.agentState
+        this.agentStateVersion = session.agentStateVersion
+        this.materializer = options.materialize
+        this.onMaterialized = options.onMaterialized
+        this.state = this.materializer ? 'pending' : 'active'
+
+        this.rpcHandlerManager = new RpcHandlerManager({
+            scopePrefix: this.sessionId,
+            logger: (msg, data) => logger.debug(msg, data)
+        })
+
+        if (this.metadata?.path) {
+            registerCommonHandlers(this.rpcHandlerManager, this.metadata.path)
+        }
+
+        this.socket = io(`${configuration.apiUrl}/cli`, {
+            auth: {
+                token: this.token,
+                clientType: 'session-scoped' as const,
+                sessionId: this.sessionId
+            },
+            path: '/socket.io/',
+            reconnection: true,
+            reconnectionAttempts: Infinity,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            transports: ['websocket'],
+            autoConnect: false,
+            ...buildSocketIoExtraHeaderOptions()
+        })
+
+        this.terminalManager = new TerminalManager({
+            sessionId: this.sessionId,
+            getSessionPath: () => this.metadata?.path ?? null,
+            onReady: (payload) => this.socket.emit('terminal:ready', payload),
+            onOutput: (payload) => this.socket.emit('terminal:output', payload),
+            onExit: (payload) => this.socket.emit('terminal:exit', payload),
+            onError: (payload) => this.socket.emit('terminal:error', payload)
+        })
+
+        this.socket.on('connect', () => {
+            logger.debug('Socket connected successfully')
+            this.awaitingMaterializedConnection = false
+            this.rpcHandlerManager.onSocketConnect(this.socket)
+            if (this.hasConnectedOnce) {
+                this.needsBackfill = true
+            }
+            void this.backfillIfNeeded()
+            this.hasConnectedOnce = true
+            this.socket.emit('session-alive', {
+                sid: this.sessionId,
+                time: Date.now(),
+                thinking: false
+            })
+        })
+
+        this.socket.on('rpc-request', async (data: { method: string; params: string }, callback: (response: string) => void) => {
+            callback(await this.rpcHandlerManager.handleRequest(data))
+        })
+
+        this.socket.on('disconnect', (reason) => {
+            logger.debug('[API] Socket disconnected:', reason)
+            this.rpcHandlerManager.onSocketDisconnect()
+            this.terminalManager.closeAll()
+            if (this.hasConnectedOnce) {
+                this.needsBackfill = true
+            }
+        })
+
+        this.socket.on('connect_error', (error) => {
+            logger.debug('[API] Socket connection error:', error)
+            this.rpcHandlerManager.onSocketDisconnect()
+        })
+
+        this.socket.on('error', (payload) => {
+            logger.debug('[API] Socket error:', payload)
+        })
+
+        const handleTerminalEvent = <T extends { sessionId: string }>(
+            schema: ZodType<T>,
+            handler: (payload: T) => void
+        ) => (data: unknown) => {
+            const parsed = schema.safeParse(data)
+            if (!parsed.success) {
+                return
+            }
+            if (parsed.data.sessionId !== this.sessionId) {
+                return
+            }
+            handler(parsed.data)
+        }
+
+        this.socket.on('terminal:open', handleTerminalEvent(TerminalOpenPayloadSchema, (payload) => {
+            this.terminalManager.create(payload.terminalId, payload.cols, payload.rows)
+        }))
+
+        this.socket.on('terminal:write', handleTerminalEvent(TerminalWritePayloadSchema, (payload) => {
+            this.terminalManager.write(payload.terminalId, payload.data)
+        }))
+
+        this.socket.on('terminal:resize', handleTerminalEvent(TerminalResizePayloadSchema, (payload) => {
+            this.terminalManager.resize(payload.terminalId, payload.cols, payload.rows)
+        }))
+
+        this.socket.on('terminal:close', handleTerminalEvent(TerminalClosePayloadSchema, (payload) => {
+            this.terminalManager.close(payload.terminalId)
+        }))
+
+        this.socket.on('update', (data: Update, ack?: (response: { removed: boolean }) => void) => {
+            try {
+                if (!data.body) return
+
+                if (data.body.t === 'new-message') {
+                    this.handleIncomingMessage(data.body.message)
+                    return
+                }
+
+                if (data.body.t === 'cancel-queued-message') {
+                    const removed = (data.body.localId && this.cancelQueuedMessageCallback)
+                        ? this.cancelQueuedMessageCallback(data.body.localId)
+                        : false
+                    ack?.({ removed })
+                    return
+                }
+
+                if (data.body.t === 'update-session') {
+                    if (data.body.metadata && data.body.metadata.version > this.metadataVersion) {
+                        const parsed = MetadataSchema.safeParse(data.body.metadata.value)
+                        if (parsed.success) {
+                            this.metadata = parsed.data
+                        } else {
+                            logger.debug('[API] Ignoring invalid metadata update', { version: data.body.metadata.version })
+                        }
+                        this.metadataVersion = data.body.metadata.version
+                    }
+                    if (data.body.agentState && data.body.agentState.version > this.agentStateVersion) {
+                        const next = data.body.agentState.value
+                        if (next == null) {
+                            this.agentState = null
+                        } else {
+                            const parsed = AgentStateSchema.safeParse(next)
+                            if (parsed.success) {
+                                this.agentState = parsed.data
+                            } else {
+                                logger.debug('[API] Ignoring invalid agentState update', { version: data.body.agentState.version })
+                            }
+                        }
+                        this.agentStateVersion = data.body.agentState.version
+                    }
+                    return
+                }
+
+                this.emit('message', data.body)
+            } catch (error) {
+                logger.debug('[SOCKET] [UPDATE] [ERROR] Error handling update', { error })
+            }
+        })
+
+        if (this.state === 'active') {
+            this.socket.connect()
+        }
+    }
+
+    getState(): ApiSessionClientState {
+        return this.state
+    }
+
+    getMetadata(): Readonly<Metadata> | null {
+        return this.metadata
+    }
+
+    isPending(): boolean {
+        return this.state === 'pending' || this.state === 'materializing'
+    }
+
+    private isClosed(): boolean {
+        return this.state === 'closed'
+    }
+
+    async materialize(): Promise<boolean> {
+        if (this.state === 'active') {
+            return true
+        }
+        if (this.state === 'closed' || !this.materializer || this.materializationDrainRequested) {
+            return false
+        }
+        if (this.materializationTask) {
+            return await this.materializationTask
+        }
+
+        this.state = 'materializing'
+        const abortController = new AbortController()
+        this.materializationAbortController = abortController
+        this.materializationTask = this.runMaterializationLoop(abortController.signal)
+            .finally(() => {
+                this.materializationTask = null
+                if (this.materializationAbortController === abortController) {
+                    this.materializationAbortController = null
+                }
+            })
+        return await this.materializationTask
+    }
+
+    private async runMaterializationLoop(signal: AbortSignal): Promise<boolean> {
+        let retryDelayMs = MATERIALIZATION_RETRY_MIN_MS
+        let finalDrainAttemptStarted = false
+
+        while (!signal.aborted && !this.isClosed()) {
+            this.metadataChangedDuringAttempt = false
+            this.agentStateChangedDuringAttempt = false
+            const snapshot: PendingSessionSnapshot = {
+                metadata: this.metadata,
+                agentState: this.agentState
+            }
+
+            try {
+                const materialized = await this.materializer!(snapshot, signal)
+                if (signal.aborted || this.isClosed()) {
+                    return false
+                }
+
+                const latestMetadata = this.metadata
+                const latestAgentState = this.agentState
+                const shouldSyncMetadata = this.metadataChangedDuringAttempt
+                    || !hasSameJsonValue(materialized.metadata, latestMetadata)
+                const shouldSyncAgentState = this.agentStateChangedDuringAttempt
+                    || !hasSameJsonValue(materialized.agentState, latestAgentState)
+
+                this.metadata = materialized.metadata
+                this.metadataVersion = materialized.metadataVersion
+                this.agentState = materialized.agentState
+                this.agentStateVersion = materialized.agentStateVersion
+                this.state = 'active'
+
+                if (shouldSyncMetadata && latestMetadata) {
+                    this.updateMetadata(() => latestMetadata)
+                }
+                if (shouldSyncAgentState && latestAgentState) {
+                    this.updateAgentState(() => latestAgentState)
+                }
+
+                const pendingEvents = this.pendingOutboundEvents.splice(0)
+                this.awaitingMaterializedConnection = pendingEvents.length > 0
+                    || shouldSyncMetadata
+                    || shouldSyncAgentState
+                for (const pendingEvent of pendingEvents) {
+                    pendingEvent.emit()
+                }
+                this.socket.connect()
+                try {
+                    this.onMaterialized?.(materialized, {
+                        metadata: latestMetadata,
+                        agentState: latestAgentState
+                    })
+                } catch (error) {
+                    logger.debug(`[API] Post-materialization callback failed for ${this.sessionId}`, error)
+                }
+                logger.debug(`[API] Materialized pending session ${this.sessionId}`)
+                return true
+            } catch (error) {
+                if (signal.aborted || this.isClosed()) {
+                    return false
+                }
+                if (!isTransientMaterializationError(error)) {
+                    this.state = 'pending'
+                    logger.warn(`[API] Failed to materialize pending session ${this.sessionId}`, error)
+                    return false
+                }
+                if (this.materializationDrainRequested) {
+                    if (finalDrainAttemptStarted) {
+                        this.state = 'pending'
+                        return false
+                    }
+                    finalDrainAttemptStarted = true
+                    logger.debug(`[API] Retrying materialization once during final drain for ${this.sessionId}`)
+                    continue
+                }
+
+                logger.debug(
+                    `[API] Hub unavailable while materializing ${this.sessionId}; retrying in ${retryDelayMs}ms`,
+                    error
+                )
+                const retryAbortController = new AbortController()
+                this.materializationRetryAbortController = retryAbortController
+                const completedDelay = await waitForAbortableDelay(
+                    retryDelayMs,
+                    signal,
+                    retryAbortController.signal
+                )
+                if (this.materializationRetryAbortController === retryAbortController) {
+                    this.materializationRetryAbortController = null
+                }
+                if (!completedDelay) {
+                    if (signal.aborted || this.isClosed()) {
+                        return false
+                    }
+                    if (this.materializationDrainRequested && !finalDrainAttemptStarted) {
+                        finalDrainAttemptStarted = true
+                        logger.debug(`[API] Skipping materialization backoff during final drain for ${this.sessionId}`)
+                        continue
+                    }
+                    this.state = 'pending'
+                    return false
+                }
+                retryDelayMs = Math.min(retryDelayMs * 2, MATERIALIZATION_RETRY_MAX_MS)
+            }
+        }
+
+        return false
+    }
+
+    private emitOrQueue(
+        emit: () => void,
+        retention: PendingOutboundEvent['retention'] = 'lossless'
+    ): void {
+        if (this.state === 'active') {
+            emit()
+            return
+        }
+        if (this.state === 'closed') {
+            return
+        }
+
+        if (retention === 'droppable') {
+            const droppableCount = this.pendingOutboundEvents.reduce(
+                (count, event) => count + (event.retention === 'droppable' ? 1 : 0),
+                0
+            )
+            if (droppableCount >= MAX_PENDING_DROPPABLE_EVENTS) {
+                const oldestDroppableIndex = this.pendingOutboundEvents.findIndex(
+                    (event) => event.retention === 'droppable'
+                )
+                if (oldestDroppableIndex >= 0) {
+                    this.pendingOutboundEvents.splice(oldestDroppableIndex, 1)
+                }
+                if (!this.didWarnPendingQueueFull) {
+                    this.didWarnPendingQueueFull = true
+                    logger.warn(`[API] Pending control event queue full for ${this.sessionId}; dropping oldest control event`)
+                }
+            }
+        }
+        this.pendingOutboundEvents.push({ emit, retention })
+    }
+
+    onUserMessage(callback: (data: UserMessage, localId?: string) => void): void {
+        this.pendingMessageCallback = callback
+        while (this.pendingMessages.length > 0) {
+            const pending = this.pendingMessages.shift()!
+            callback(pending.message, pending.localId)
+        }
+    }
+
+    onCancelQueuedMessage(callback: (localId: string) => boolean): void {
+        this.cancelQueuedMessageCallback = callback
+    }
+
+    private enqueueUserMessage(message: UserMessage, localId?: string): void {
+        if (this.pendingMessageCallback) {
+            this.pendingMessageCallback(message, localId)
+        } else {
+            this.pendingMessages.push({ message, localId })
+        }
+    }
+
+    private handleIncomingMessage(message: { id?: string; seq?: number; localId?: string | null; content: unknown }): void {
+        if (!this.incomingFilter.accept({ id: message.id, seq: message.seq })) {
+            return
+        }
+
+        const userResult = UserMessageSchema.safeParse(message.content)
+        if (userResult.success) {
+            // User messages mirrored from a local agent transcript are history,
+            // not new remote input. Keep them in the incoming filter above so
+            // reconnect backfill still advances and deduplicates correctly.
+            if (userResult.data.meta?.sentFrom === 'cli') {
+                return
+            }
+            this.enqueueUserMessage(userResult.data, message.localId ?? undefined)
+            return
+        }
+
+        this.emit('message', message.content)
+    }
+
+    private async backfillIfNeeded(): Promise<void> {
+        if (!this.needsBackfill) {
+            return
+        }
+        try {
+            await this.backfillMessages()
+            this.needsBackfill = false
+        } catch (error) {
+            logger.debug('[API] Backfill failed', error)
+            this.needsBackfill = true
+        }
+    }
+
+    private async backfillMessages(): Promise<void> {
+        if (this.backfillInFlight) {
+            await this.backfillInFlight
+            return
+        }
+
+        const startSeq = this.incomingFilter.cursorSeq()
+        if (startSeq === null) {
+            logger.debug('[API] Skipping backfill because no last-seen message sequence is available')
+            return
+        }
+
+        const limit = 200
+        const run = async () => {
+            let cursor = startSeq
+            while (true) {
+                const response = await axios.get(
+                    `${configuration.apiUrl}/cli/sessions/${encodeURIComponent(this.sessionId)}/messages`,
+                    {
+                        params: { afterSeq: cursor, limit },
+                        headers: buildHubRequestHeaders({
+                            Authorization: `Bearer ${this.token}`,
+                            'Content-Type': 'application/json'
+                        }),
+                        timeout: 15_000
+                    }
+                )
+
+                const parsed = CliMessagesResponseSchema.safeParse(response.data)
+                if (!parsed.success) {
+                    throw apiValidationError('Invalid /cli/sessions/:id/messages response', response)
+                }
+
+                const messages = parsed.data.messages
+                if (messages.length === 0) {
+                    break
+                }
+
+                let maxSeq = cursor
+                for (const message of messages) {
+                    if (typeof message.seq === 'number') {
+                        if (message.seq > maxSeq) {
+                            maxSeq = message.seq
+                        }
+                    }
+                    this.handleIncomingMessage(message)
+                }
+
+                const observedSeq = this.incomingFilter.cursorSeq() ?? maxSeq
+                const nextCursor = Math.max(maxSeq, observedSeq)
+                if (nextCursor <= cursor) {
+                    logger.debug('[API] Backfill stopped due to non-advancing cursor', {
+                        cursor,
+                        maxSeq,
+                        observedSeq
+                    })
+                    break
+                }
+
+                cursor = nextCursor
+                if (messages.length < limit) {
+                    break
+                }
+            }
+        }
+
+        this.backfillInFlight = run().finally(() => {
+            this.backfillInFlight = null
+        })
+
+        await this.backfillInFlight
+    }
+
+    sendClaudeSessionMessage(body: RawJSONLines): void {
+        let content: MessageContent
+
+        if (isExternalUserMessage(body)) {
+            content = {
+                role: 'user',
+                content: {
+                    type: 'text',
+                    text: extractRawUserTextContent(body.message.content) ?? ''
+                },
+                meta: {
+                    sentFrom: 'cli'
+                }
+            }
+        } else {
+            content = {
+                role: 'agent',
+                content: {
+                    type: 'output',
+                    data: body
+                },
+                meta: {
+                    sentFrom: 'cli'
+                }
+            }
+        }
+
+        this.emitOrQueue(() => {
+            this.socket.emit('message', {
+                sid: this.sessionId,
+                message: content
+            })
+        })
+
+        if (body.type === 'summary' && 'summary' in body && 'leafUuid' in body) {
+            this.updateMetadata((metadata) => ({
+                ...metadata,
+                summary: {
+                    text: body.summary,
+                    updatedAt: Date.now()
+                }
+            }))
+        }
+    }
+
+    sendUserMessage(text: string, meta?: MessageMeta): void {
+        if (!text) {
+            return
+        }
+
+        const content: MessageContent = {
+            role: 'user',
+            content: {
+                type: 'text',
+                text
+            },
+            meta: {
+                sentFrom: 'cli',
+                ...(meta ?? {})
+            }
+        }
+
+        this.emitOrQueue(() => {
+            this.socket.emit('message', {
+                sid: this.sessionId,
+                message: content
+            })
+        })
+        this.notifyUserActivity()
+    }
+
+    notifyUserActivity(): void {
+        void this.materialize()
+    }
+
+    sendAgentMessage(body: unknown): void {
+        const content = {
+            role: 'agent',
+            content: {
+                type: AGENT_MESSAGE_PAYLOAD_TYPE,
+                data: body
+            },
+            meta: {
+                sentFrom: 'cli'
+            }
+        }
+        this.emitOrQueue(() => {
+            this.socket.emit('message', {
+                sid: this.sessionId,
+                message: content
+            })
+        })
+    }
+
+    sendSessionEvent(event: {
+        type: 'switch'
+        mode: 'local' | 'remote'
+    } | {
+        type: 'message'
+        message: string
+    } | {
+        type: 'permission-mode-changed'
+        mode: SessionPermissionMode
+    } | {
+        type: 'ready'
+    }, id?: string): void {
+        const content = {
+            role: 'agent',
+            content: {
+                id: id ?? randomUUID(),
+                type: 'event',
+                data: event
+            }
+        }
+
+        this.emitOrQueue(() => {
+            this.socket.emit('message', {
+                sid: this.sessionId,
+                message: content
+            })
+        }, event.type === 'message' ? 'lossless' : 'droppable')
+    }
+
+    keepAlive(
+        thinking: boolean,
+        mode: 'local' | 'remote',
+        runtime?: {
+            permissionMode?: SessionPermissionMode
+            model?: SessionModel
+            modelReasoningEffort?: string | null
+            effort?: string | null
+            serviceTier?: string | null
+            collaborationMode?: SessionCollaborationMode
+        }
+    ): void {
+        if (this.state !== 'active') {
+            return
+        }
+        this.socket.volatile.emit('session-alive', {
+            sid: this.sessionId,
+            time: Date.now(),
+            thinking,
+            mode,
+            ...(runtime ?? {})
+        })
+    }
+
+    /** Hub waits for this before mergeSessions on Cursor ACP reopen (tiann/hapi#939). */
+    emitSessionReady(): void {
+        this.emitOrQueue(() => {
+            this.socket.emit('session-ready', {
+                sid: this.sessionId,
+                time: Date.now()
+            })
+        }, 'droppable')
+    }
+
+    emitMessagesConsumed(localIds: string[], options?: { clearQueuedThinkingGrace?: boolean }): void {
+        if (localIds.length === 0) return
+        // `clearQueuedThinkingGrace` is an opt-in signal for the hub to drop
+        // the 15s queued-thinking grace immediately. Only synchronous handlers
+        // that will never call `onThinkingChange(true)` (slash commands handled
+        // inside `onUserMessage`) should set it — normal queue drains still
+        // need the grace so the spinner doesn't flicker between drain and
+        // backend.prompt start.
+        const payload: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean } = {
+            sid: this.sessionId,
+            localIds
+        }
+        if (options?.clearQueuedThinkingGrace) {
+            payload.clearQueuedThinkingGrace = true
+        }
+        this.emitOrQueue(() => this.socket.emit('messages-consumed', payload))
+    }
+
+    sendSessionDeath(reason?: SessionEndReason): void {
+        if (this.state === 'active') {
+            void cleanupUploadDir(this.sessionId)
+        }
+        this.emitOrQueue(() => {
+            this.socket.emit('session-end', { sid: this.sessionId, time: Date.now(), reason })
+        })
+    }
+
+    updateMetadata(handler: (metadata: Metadata) => Metadata): void {
+        if (this.state !== 'active') {
+            if (this.state === 'closed') return
+            const current = this.metadata ?? ({} as Metadata)
+            this.metadata = handler(current)
+            if (this.state === 'materializing') {
+                this.metadataChangedDuringAttempt = true
+            }
+            return
+        }
+        this.metadataLock.inLock(async () => {
+            await backoff(async () => {
+                const current = this.metadata ?? ({} as Metadata)
+                const updated = handler(current)
+
+                const answer = await this.socket.emitWithAck('update-metadata', {
+                    sid: this.sessionId,
+                    expectedVersion: this.metadataVersion,
+                    metadata: updated
+                }) as unknown
+
+                applyVersionedAck(answer, {
+                    valueKey: 'metadata',
+                    parseValue: (value) => {
+                        const parsed = MetadataSchema.safeParse(value)
+                        return parsed.success ? parsed.data : null
+                    },
+                    applyValue: (value) => {
+                        this.metadata = value
+                    },
+                    applyVersion: (version) => {
+                        this.metadataVersion = version
+                    },
+                    logInvalidValue: (context, version) => {
+                        const suffix = context === 'success' ? 'ack' : 'version-mismatch ack'
+                        logger.debug(`[API] Ignoring invalid metadata value from ${suffix}`, { version })
+                    },
+                    invalidResponseMessage: 'Invalid update-metadata response',
+                    errorMessage: 'Metadata update failed',
+                    versionMismatchMessage: 'Metadata version mismatch'
+                })
+            })
+        })
+    }
+
+    updateAgentState(handler: (state: AgentState) => AgentState): void {
+        if (this.state !== 'active') {
+            if (this.state === 'closed') return
+            const current = this.agentState ?? ({} as AgentState)
+            this.agentState = handler(current)
+            if (this.state === 'materializing') {
+                this.agentStateChangedDuringAttempt = true
+            }
+            return
+        }
+        this.agentStateLock.inLock(async () => {
+            await backoff(async () => {
+                const current = this.agentState ?? ({} as AgentState)
+                const updated = handler(current)
+
+                const answer = await this.socket.emitWithAck('update-state', {
+                    sid: this.sessionId,
+                    expectedVersion: this.agentStateVersion,
+                    agentState: updated
+                }) as unknown
+
+                applyVersionedAck(answer, {
+                    valueKey: 'agentState',
+                    parseValue: (value) => {
+                        const parsed = AgentStateSchema.safeParse(value)
+                        return parsed.success ? parsed.data : null
+                    },
+                    applyValue: (value) => {
+                        this.agentState = value
+                    },
+                    applyVersion: (version) => {
+                        this.agentStateVersion = version
+                    },
+                    logInvalidValue: (context, version) => {
+                        const suffix = context === 'success' ? 'ack' : 'version-mismatch ack'
+                        logger.debug(`[API] Ignoring invalid agentState value from ${suffix}`, { version })
+                    },
+                    invalidResponseMessage: 'Invalid update-state response',
+                    errorMessage: 'Agent state update failed',
+                    versionMismatchMessage: 'Agent state version mismatch'
+                })
+            })
+        })
+    }
+
+    private async drainLock(lock: AsyncLock, timeoutMs: number): Promise<boolean> {
+        if (timeoutMs <= 0) {
+            return false
+        }
+
+        return await new Promise<boolean>((resolve) => {
+            let settled = false
+            let timeout: ReturnType<typeof setTimeout> | null = null
+
+            const finish = (value: boolean) => {
+                if (settled) return
+                settled = true
+                if (timeout) {
+                    clearTimeout(timeout)
+                }
+                resolve(value)
+            }
+
+            timeout = setTimeout(() => finish(false), timeoutMs)
+
+            lock.inLock(async () => { })
+                .then(() => finish(true))
+                .catch(() => finish(false))
+        })
+    }
+
+    private async waitForPromise(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+        if (timeoutMs <= 0) {
+            return false
+        }
+
+        return await new Promise<boolean>((resolve) => {
+            let settled = false
+            const timeout = setTimeout(() => finish(false), timeoutMs)
+            const finish = (value: boolean) => {
+                if (settled) return
+                settled = true
+                clearTimeout(timeout)
+                resolve(value)
+            }
+
+            promise.then(() => finish(true)).catch(() => finish(true))
+        })
+    }
+
+    private async waitForConnected(timeoutMs: number): Promise<boolean> {
+        if (this.socket.connected) {
+            return true
+        }
+        if (timeoutMs <= 0) {
+            return false
+        }
+
+        return await new Promise<boolean>((resolve) => {
+            let settled = false
+            const cleanup = () => {
+                clearTimeout(timeout)
+                this.socket.off('connect', onConnect)
+            }
+            const finish = (value: boolean) => {
+                if (settled) return
+                settled = true
+                cleanup()
+                resolve(value)
+            }
+            const onConnect = () => finish(true)
+            const timeout = setTimeout(() => finish(false), timeoutMs)
+
+            this.socket.on('connect', onConnect)
+
+            if (!this.awaitingMaterializedConnection) {
+                this.socket.connect()
+            }
+
+            if (this.socket.connected) {
+                finish(true)
+            }
+        })
+    }
+
+    /**
+     * tiann/hapi#913: wait until any pending `update-metadata` writes have
+     * been acked by the hub (or the timeout elapses). `updateMetadata` is
+     * fire-and-forget at the call site because it's invoked on the hot path
+     * for every turn; this helper lets the few callers who actually need
+     * durability — fresh ACP session-id pre-registration is the canonical
+     * case — synchronously gate on persistence without changing every
+     * caller's signature.
+     *
+     * Returns true when the lock drained, false when the timeout fired.
+     */
+    async flushMetadata(timeoutMs: number = 5_000): Promise<boolean> {
+        if (this.state !== 'active') {
+            return false
+        }
+        return await this.drainLock(this.metadataLock, timeoutMs)
+    }
+
+    async flush(options?: { timeoutMs?: number }): Promise<void> {
+        const deadlineMs = Date.now() + (options?.timeoutMs ?? 5_000)
+        const remainingMs = () => Math.max(0, deadlineMs - Date.now())
+
+        const materializationTask = this.materializationTask
+        if (materializationTask) {
+            this.materializationDrainRequested = true
+            this.materializationRetryAbortController?.abort()
+            await this.waitForPromise(materializationTask, remainingMs())
+        }
+
+        if (this.state !== 'active') {
+            return
+        }
+
+        if (!this.socket.connected) {
+            const connected = await this.waitForConnected(remainingMs())
+            if (!connected) {
+                return
+            }
+        }
+
+        await this.drainLock(this.metadataLock, remainingMs())
+        await this.drainLock(this.agentStateLock, remainingMs())
+
+        if (remainingMs() === 0) {
+            return
+        }
+
+        const pingTimeoutMs = remainingMs()
+        if (pingTimeoutMs === 0) {
+            return
+        }
+
+        try {
+            await this.socket.timeout(pingTimeoutMs).emitWithAck('ping')
+            this.awaitingMaterializedConnection = false
+        } catch {
+            // best effort
+        }
+    }
+
+    close(): void {
+        if (this.state === 'closed') {
+            return
+        }
+        this.state = 'closed'
+        this.materializationAbortController?.abort()
+        this.materializationAbortController = null
+        this.materializationRetryAbortController?.abort()
+        this.materializationRetryAbortController = null
+        this.awaitingMaterializedConnection = false
+        this.pendingOutboundEvents.length = 0
+        this.rpcHandlerManager.onSocketDisconnect()
+        this.terminalManager.closeAll()
+        this.socket.disconnect()
+    }
+}

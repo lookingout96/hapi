@@ -1,0 +1,57 @@
+import { isKnownFlavor } from '@hapi/protocol'
+import type { Session } from '@/types/api'
+
+/** Agent thread id used by hub `resolveAgentResumeId`, flavor-specific.
+ *  Mirrors hub: cross-flavor ids are ignored to avoid the web layer claiming a
+ *  session is resumable when the hub will only honor the current flavor's id.
+ */
+export function resolveAgentSessionIdFromMetadata(
+    metadata: Session['metadata'] | null | undefined,
+): string | undefined {
+    if (!metadata) {
+        return undefined
+    }
+    const flavor = isKnownFlavor(metadata.flavor) ? metadata.flavor : 'claude'
+    switch (flavor) {
+        case 'codex': return metadata.codexSessionId ?? undefined
+        case 'gemini': return metadata.geminiSessionId ?? undefined
+        case 'opencode': return metadata.opencodeSessionId ?? undefined
+        case 'grok': return metadata.grokSessionId ?? undefined
+        case 'cursor': return metadata.cursorSessionId ?? undefined
+        case 'kimi': return metadata.kimiSessionId ?? undefined
+        case 'pi': return metadata.piSessionId ?? undefined
+        default: return metadata.claudeSessionId ?? undefined
+    }
+}
+
+/**
+ * Whether an inactive session can be activated via resume (or fresh spawn on first send).
+ * Matches hub: resume with agent id, or fresh spawn when path exists, no agent id, no user messages.
+ * Claude and Codex with messages but no flavor-specific id may attempt the
+ * hub-authoritative stored-message recovery path; the hub still rejects logs
+ * without a safe resume id.
+ */
+export function inactiveSessionCanResume(
+    session: Session,
+    userMessageCount: number,
+    cursorChatOnDisk?: boolean,
+): boolean {
+    if (session.active) {
+        return true
+    }
+    if (!session.metadata?.path) {
+        return false
+    }
+    if (resolveAgentSessionIdFromMetadata(session.metadata)) {
+        const flavor = isKnownFlavor(session.metadata.flavor) ? session.metadata.flavor : 'claude'
+        if (flavor === 'cursor') {
+            return cursorChatOnDisk === true
+        }
+        return true
+    }
+    const flavor = isKnownFlavor(session.metadata.flavor) ? session.metadata.flavor : 'claude'
+    if ((flavor === 'claude' || flavor === 'codex') && userMessageCount > 0) {
+        return true
+    }
+    return userMessageCount === 0
+}
