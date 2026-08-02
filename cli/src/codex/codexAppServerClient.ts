@@ -9,6 +9,8 @@ import type {
     InitializeResponse,
     ModelListParams,
     ModelListResponse,
+    SkillsListParams,
+    SkillsListResponse,
     ThreadStartParams,
     ThreadStartResponse,
     ThreadResumeParams,
@@ -243,6 +245,13 @@ export class CodexAppServerClient extends JsonLineParser {
             timeoutMs: 30_000
         });
         return response as ModelListResponse;
+    }
+
+    async listSkills(params: SkillsListParams): Promise<SkillsListResponse> {
+        const response = await this.sendRequest('skills/list', params, {
+            timeoutMs: 30_000
+        });
+        return response as SkillsListResponse;
     }
 
     async listCollaborationModes(): Promise<CollaborationModeListResponse> {
