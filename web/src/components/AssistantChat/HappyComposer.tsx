@@ -47,6 +47,9 @@ import { getPiThinkingLevelOptions, getHighestThinkingLevel, isThinkingLevelSupp
 import { groupModelsByProvider } from './piModelGroups'
 import { PiModelPanel } from './PiModelPanel'
 import { PiThinkingLevelPanel } from './PiThinkingLevelPanel'
+import type { ApiClient } from '@/api/client'
+import { useVoiceInputPreferences } from '@/hooks/useVoiceInputPreferences'
+import { useDictation } from '@/hooks/useDictation'
 
 export interface TextInputState {
     text: string
@@ -229,6 +232,7 @@ export function HappyComposer(props: {
     voiceMicMuted?: boolean
     onVoiceToggle?: () => void
     onVoiceMicToggle?: () => void
+    voiceTranscriptionApi?: ApiClient
     // Schedule props (lifted from internal state when provided)
     pendingSchedule?: PendingSchedule | null
     onSchedule?: (pending: PendingSchedule) => void
@@ -315,6 +319,40 @@ export function HappyComposer(props: {
     const attachments = useAuiState((s) => s.composer.attachments)
     const threadIsRunning = useAuiState((s) => s.thread.isRunning)
     const threadIsDisabled = useAuiState((s) => s.thread.isDisabled)
+    const composerTextRef = useRef(composerText)
+    composerTextRef.current = composerText
+    const getCurrentComposerText = useCallback(() => composerTextRef.current, [])
+    const setComposerText = useCallback((text: string) => api.composer().setText(text), [api])
+    const voiceInput = useVoiceInputPreferences(props.voiceTranscriptionApi ?? null)
+    const dictationConfig = useMemo(() => ({
+        api: props.voiceTranscriptionApi ?? null,
+        provider: voiceInput.provider,
+        mode: voiceInput.transcriptionMode,
+        getCurrentText: getCurrentComposerText,
+        onTextChange: setComposerText
+    }), [
+        props.voiceTranscriptionApi,
+        voiceInput.provider,
+        voiceInput.transcriptionMode,
+        getCurrentComposerText,
+        setComposerText
+    ])
+    const dictation = useDictation(dictationConfig)
+    const dictationActive = voiceInput.voiceMode === 'dictation'
+    const effectiveVoiceStatus = dictationActive ? dictation.status : voiceStatus
+    const effectiveVoiceToggle = dictationActive
+        ? (dictation.supported ? dictation.toggle : undefined)
+        : onVoiceToggle
+    const previousVoiceModeRef = useRef(voiceInput.voiceMode)
+    useEffect(() => {
+        if (previousVoiceModeRef.current === voiceInput.voiceMode) return
+        previousVoiceModeRef.current = voiceInput.voiceMode
+        if (dictationActive && (voiceStatus === 'connected' || voiceStatus === 'connecting')) {
+            onVoiceToggle?.()
+        } else if (!dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
+            void dictation.toggle()
+        }
+    }, [dictationActive, voiceInput.voiceMode, voiceStatus, onVoiceToggle, dictation.status, dictation.toggle])
 
     const controlsDisabled = disabled || (!active && !allowSendWhenInactive) || threadIsDisabled
     const trimmed = composerText.trim()
@@ -889,7 +927,7 @@ export function HappyComposer(props: {
         || showFastModeSettings
     )
     const showAbortButton = true
-    const voiceEnabled = Boolean(onVoiceToggle)
+    const voiceEnabled = Boolean(effectiveVoiceToggle)
 
     const handleSend = useCallback(() => {
         flushAndSend()
@@ -1380,8 +1418,14 @@ export function HappyComposer(props: {
                         permissionMode={permissionMode}
                         collaborationMode={collaborationMode}
                         agentFlavor={agentFlavor}
-                        voiceStatus={voiceStatus}
+                        voiceStatus={effectiveVoiceStatus}
                     />
+
+                    {dictationActive && dictation.error ? (
+                        <div role="alert" className="mb-2 rounded-md bg-[var(--app-subtle-bg)] px-3 py-2 text-sm text-red-600">
+                            {dictation.error}
+                        </div>
+                    ) : null}
 
                     {sendError ? (
                         <div
@@ -1467,10 +1511,11 @@ export function HappyComposer(props: {
                             isSwitching={isSwitching}
                             onSwitch={handleSwitch}
                             voiceEnabled={voiceEnabled}
-                            voiceStatus={voiceStatus}
-                            voiceMicMuted={voiceMicMuted}
-                            onVoiceToggle={onVoiceToggle ?? (() => {})}
-                            onVoiceMicToggle={onVoiceMicToggle}
+                            dictationEnabled={dictationActive}
+                            voiceStatus={effectiveVoiceStatus}
+                            voiceMicMuted={dictationActive ? false : voiceMicMuted}
+                            onVoiceToggle={effectiveVoiceToggle ?? (() => {})}
+                            onVoiceMicToggle={dictationActive ? undefined : onVoiceMicToggle}
                             onSend={handleSend}
                             pendingSchedule={pendingSchedule}
                             onSchedule={setPendingSchedule}

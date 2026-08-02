@@ -389,6 +389,7 @@ export function UnifiedButton(props: {
     controlsDisabled: boolean
     onSend: () => void
     onVoiceToggle: () => void
+    voiceLabel?: string
     /**
      * When true, the send button repaints amber and the aria-label
      * announces "Send to scratchlist" instead of "Send message". The
@@ -446,7 +447,7 @@ export function UnifiedButton(props: {
     } else if (props.voiceEnabled) {
         icon = <VoiceAssistantIcon />
         className = 'bg-black text-white'
-        ariaLabel = t('composer.voice')
+        ariaLabel = props.voiceLabel ?? t('composer.voice')
     } else {
         icon = <SendIcon />
         className = 'bg-[#C0C0C0] text-white'
@@ -478,6 +479,37 @@ export function UnifiedButton(props: {
     )
 }
 
+export function DictationButton(props: {
+    enabled: boolean
+    canSend: boolean
+    voiceEnabled: boolean
+    voiceStatus: ConversationStatus
+    controlsDisabled: boolean
+    onVoiceToggle: () => void
+}) {
+    const { t } = useTranslation()
+    if (
+        !props.enabled
+        || !props.canSend
+        || !props.voiceEnabled
+        || props.voiceStatus === 'connecting'
+        || props.voiceStatus === 'connected'
+    ) return null
+
+    return (
+        <button
+            type="button"
+            onClick={props.onVoiceToggle}
+            disabled={props.controlsDisabled}
+            aria-label={t('composer.dictate')}
+            title={t('composer.dictate')}
+            className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--app-fg)]/60 transition-colors hover:bg-[var(--app-bg)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+            <VoiceAssistantIcon />
+        </button>
+    )
+}
+
 export function ComposerButtons(props: {
     canSend: boolean
     controlsDisabled: boolean
@@ -496,6 +528,7 @@ export function ComposerButtons(props: {
     isSwitching: boolean
     onSwitch: () => void
     voiceEnabled: boolean
+    dictationEnabled?: boolean
     voiceStatus: ConversationStatus
     voiceMicMuted?: boolean
     onVoiceToggle: () => void
@@ -739,6 +772,15 @@ export function ComposerButtons(props: {
                 </OrderedToolbarItems>
             </div>
 
+            <DictationButton
+                enabled={props.dictationEnabled ?? false}
+                canSend={props.canSend}
+                voiceEnabled={props.voiceEnabled}
+                voiceStatus={props.voiceStatus}
+                controlsDisabled={props.controlsDisabled}
+                onVoiceToggle={props.onVoiceToggle}
+            />
+
             <UnifiedButton
                 canSend={props.canSend}
                 voiceStatus={props.voiceStatus}
@@ -746,6 +788,7 @@ export function ComposerButtons(props: {
                 controlsDisabled={props.controlsDisabled}
                 onSend={props.onSend}
                 onVoiceToggle={props.onVoiceToggle}
+                voiceLabel={props.dictationEnabled ? t('composer.dictate') : undefined}
                 /*
                  * Derived, NOT raw scratchlistMode. Mirror SessionChat's
                  * shouldRouteToScratchlist: amber + "Send to scratchlist"

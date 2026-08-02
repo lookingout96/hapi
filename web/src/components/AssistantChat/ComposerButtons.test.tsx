@@ -1,8 +1,8 @@
 import type { ReactElement } from 'react'
-import { cleanup, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '@/lib/i18n-context'
-import { UnifiedButton } from './ComposerButtons'
+import { DictationButton, UnifiedButton } from './ComposerButtons'
 
 function renderInProviders(ui: ReactElement) {
     return render(<I18nProvider>{ui}</I18nProvider>)
@@ -80,5 +80,26 @@ describe('UnifiedButton — routesToScratchlist visual state', () => {
         )
         const btn = getButton('Send')
         expect(btn.className).not.toContain('bg-amber-500')
+    })
+})
+
+describe('DictationButton', () => {
+    afterEach(cleanup)
+
+    it('keeps dictation available when an existing draft makes the main button a send button', () => {
+        const onVoiceToggle = vi.fn()
+        renderInProviders(
+            <DictationButton
+                enabled
+                canSend
+                voiceEnabled
+                voiceStatus="disconnected"
+                controlsDisabled={false}
+                onVoiceToggle={onVoiceToggle}
+            />,
+        )
+
+        fireEvent.click(getButton('Dictate'))
+        expect(onVoiceToggle).toHaveBeenCalledOnce()
     })
 })
