@@ -19,7 +19,7 @@ import {
     RichComposerInput,
     type RichComposerInputHandle,
 } from '@/components/AssistantChat/RichComposerInput'
-import type { AgentState, CodexCollaborationMode, PermissionMode, PiModelSummary, ThreadGoal } from '@/types/api'
+import type { AgentState, CodexCollaborationMode, PermissionMode, PiModelSummary } from '@/types/api'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import type { ConversationStatus } from '@/realtime/types'
 import { useActiveWord } from '@/hooks/useActiveWord'
@@ -179,7 +179,6 @@ export function HappyComposer(props: {
     disabled?: boolean
     permissionMode?: PermissionMode
     collaborationMode?: CodexCollaborationMode
-    threadGoal?: ThreadGoal | null
     model?: string | null
     modelReasoningEffort?: string | null
     effort?: string | null
@@ -254,7 +253,6 @@ export function HappyComposer(props: {
         disabled = false,
         permissionMode: rawPermissionMode,
         collaborationMode: rawCollaborationMode,
-        threadGoal,
         model: rawModel,
         modelReasoningEffort: rawModelReasoningEffort,
         effort: rawEffort,
@@ -1381,7 +1379,6 @@ export function HappyComposer(props: {
                         serviceTier={serviceTier}
                         permissionMode={permissionMode}
                         collaborationMode={collaborationMode}
-                        threadGoal={threadGoal}
                         agentFlavor={agentFlavor}
                         voiceStatus={voiceStatus}
                     />
