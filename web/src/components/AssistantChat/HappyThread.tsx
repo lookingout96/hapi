@@ -158,8 +158,13 @@ export function getScrollIntent(params: {
     }
 }
 
-export function shouldCancelInitialScrollSettling(intent: ScrollIntent): boolean {
-    return intent.isScrollingUp && intent.distanceFromBottom > MANUAL_SCROLL_EPSILON_PX
+export function shouldCancelInitialScrollSettling(
+    intent: ScrollIntent,
+    hasExplicitUpwardIntent: boolean
+): boolean {
+    return hasExplicitUpwardIntent
+        && intent.isScrollingUp
+        && intent.distanceFromBottom > MANUAL_SCROLL_EPSILON_PX
 }
 
 export function captureScrollAnchor(viewport: HTMLElement): ScrollAnchor | null {
@@ -608,8 +613,16 @@ export function HappyThread(props: {
         let wheelIntentUntil = 0
         let wheelLatched = false
 
+        const hasExplicitUpwardIntent = (intent: ScrollIntent): boolean => {
+            return intent.isScrollingUp && (
+                pointerResumeActive
+                || keyboardResumeUntil >= Date.now()
+                || wheelIntentUntil >= Date.now()
+            )
+        }
+
         const consumeExplicitUpwardIntent = (intent: ScrollIntent): boolean => {
-            if (!intent.isScrollingUp) {
+            if (!hasExplicitUpwardIntent(intent)) {
                 return false
             }
             if (pointerResumeActive && !pointerResumeLatched) {
@@ -658,10 +671,11 @@ export function HappyThread(props: {
             // Keep the keyboard/pointer intent armed while the user moves
             // through ordinary history. Consume it only when the viewport
             // actually reaches the preload area.
+            const hadExplicitUpwardIntent = hasExplicitUpwardIntent(intent)
             const explicitUpwardIntent = needsCoverage && consumeExplicitUpwardIntent(intent)
 
             if (isInitialScrollSettling()) {
-                if (shouldCancelInitialScrollSettling(intent)) {
+                if (shouldCancelInitialScrollSettling(intent, hadExplicitUpwardIntent)) {
                     initialScrollDeadlineRef.current = 0
                     clearInitialScrollTimers()
                     setAutoScrollMode(false)
