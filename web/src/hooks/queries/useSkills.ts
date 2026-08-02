@@ -39,7 +39,11 @@ export function useSkills(
             if (!api || !sessionId) {
                 throw new Error('Session unavailable')
             }
-            return await api.getSkills(sessionId)
+            const response = await api.getSkills(sessionId)
+            if (!response.success) {
+                throw new Error(response.error ?? 'Failed to load skills')
+            }
+            return response
         },
         enabled: Boolean(api && sessionId),
         staleTime: 30_000,

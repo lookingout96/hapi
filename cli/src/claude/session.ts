@@ -23,6 +23,7 @@ export class Session extends AgentSessionBase<EnhancedMode> {
     readonly startedBy: 'runner' | 'terminal';
     readonly startingMode: 'local' | 'remote';
     localLaunchFailure: LocalLaunchFailure | null = null;
+    private nativeSkillNames = new Set<string>();
 
     constructor(opts: {
         api: ApiClient;
@@ -95,6 +96,17 @@ export class Session extends AgentSessionBase<EnhancedMode> {
 
     setEffort = (effort: SessionEffort): void => {
         this.effort = effort;
+    };
+
+    setNativeSkillNames = (names: readonly string[]): void => {
+        this.nativeSkillNames = new Set(names);
+    };
+
+    expandSkillReference = (message: string, trailingContext = ''): string => {
+        const match = /^\s*\$([^\s]+)(?=\s|$)/.exec(message);
+        if (!match || !this.nativeSkillNames.has(match[1])) return message;
+        const expanded = `/${match[1]}${message.slice(match[0].length)}`;
+        return trailingContext ? `${expanded}\n\n${trailingContext}` : expanded;
     };
 
     recordLocalLaunchFailure = (message: string, exitReason: LocalLaunchExitReason): void => {
