@@ -1377,6 +1377,7 @@ export function HappyComposer(props: {
                         contextModel={contextModel}
                         model={model}
                         modelReasoningEffort={modelReasoningEffort}
+                        effort={effort}
                         serviceTier={serviceTier}
                         permissionMode={permissionMode}
                         collaborationMode={collaborationMode}
