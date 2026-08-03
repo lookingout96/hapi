@@ -468,6 +468,26 @@ export class ApiClient {
         })
     }
 
+    async forkConversation(sessionId: string, messageLocalId?: string): Promise<{ sessionId: string }> {
+        return await this.request<{ sessionId: string }>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
+            {
+                method: 'POST',
+                body: JSON.stringify(messageLocalId ? { messageLocalId } : {})
+            }
+        )
+    }
+
+    async rewindConversation(sessionId: string, messageLocalId: string): Promise<{ success: true }> {
+        return await this.request<{ success: true }>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/rewind`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ messageLocalId })
+            }
+        )
+    }
+
     async archiveSession(sessionId: string): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
             method: 'POST',

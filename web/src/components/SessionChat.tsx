@@ -19,7 +19,7 @@ import { normalizeDecryptedMessage } from '@/chat/normalize'
 import { reduceChatBlocks } from '@/chat/reducer'
 import { reconcileChatBlocks } from '@/chat/reconcile'
 import { buildConversationOutline } from '@/chat/outline'
-import { buildVisibleChatBlocks, isToolGroupBlock, type ToolGroupBlock } from '@/chat/toolGroups'
+import { buildVisibleChatBlocks, isToolGroupBlock, visibleBlockRole, type ToolGroupBlock } from '@/chat/toolGroups'
 import { useUnseenBlockCount } from '@/hooks/useUnseenBlockCount'
 import { isQueuedForInvocation } from '@/lib/messages'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
@@ -42,7 +42,7 @@ import { classifySessionAttention, getSessionAttentionLabelKey } from '@/lib/ses
 import { getSessionLastSeenAt } from '@/lib/sessionLastSeen'
 import { formatRelativeTime } from '@/lib/relativeTime'
 import { ScratchlistMigrationBanner } from '@/components/AssistantChat/ScratchlistMigrationBanner'
-import { useHappyRuntime } from '@/lib/assistant-runtime'
+import { assignThreadMessageIds, useHappyRuntime } from '@/lib/assistant-runtime'
 import type { OlderLoadOutcome } from '@/lib/message-window-store'
 import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
 import { createScratchlistAttachmentAdapter } from '@/lib/scratchlistAttachmentAdapter'
@@ -468,6 +468,27 @@ function SessionChatInner(props: SessionChatProps) {
     const { haptic } = usePlatform()
     const { t } = useTranslation()
     const navigate = useNavigate()
+    const [historyActionPending, setHistoryActionPending] = useState(false)
+
+    const onForkConversation = useCallback(async (messageLocalId?: string) => {
+        setHistoryActionPending(true)
+        try {
+            const result = await props.api.forkConversation(props.session.id, messageLocalId)
+            await navigate({ to: '/sessions/$sessionId', params: { sessionId: result.sessionId } })
+        } finally {
+            setHistoryActionPending(false)
+        }
+    }, [navigate, props.api, props.session.id])
+
+    const onRewindConversation = useCallback(async (messageLocalId: string) => {
+        setHistoryActionPending(true)
+        try {
+            await props.api.rewindConversation(props.session.id, messageLocalId)
+            props.onRefresh()
+        } finally {
+            setHistoryActionPending(false)
+        }
+    }, [props.api, props.onRefresh, props.session.id])
     const sessionInactive = !props.session.active
     const inactiveCanResume = inactiveSessionCanResume(
         props.session,
@@ -1049,6 +1070,30 @@ function SessionChatInner(props: SessionChatProps) {
         [reconciled.blocks, props.hasMoreMessages]
     )
 
+    // Fork-current must compare against assistant-ui message ids (`kind:id`),
+    // not raw hub message ids — MessageActions receive the rendered card id,
+    // and adjacent assistant blocks join under the first block's id.
+    const latestCompletedBoundaryId = useMemo(() => {
+        if (props.viewMode !== 'tail') return null
+        let candidate: string | null = null
+        let previousRole: ReturnType<typeof visibleBlockRole> | null = null
+        for (const { block, threadMessageId } of assignThreadMessageIds(visibleBlocks)) {
+            const role = visibleBlockRole(block)
+            if (
+                (role === 'user' && block.invokedAt != null)
+                || (role === 'assistant' && previousRole !== 'assistant')
+            ) {
+                candidate = threadMessageId
+            }
+            previousRole = role
+        }
+        return candidate
+    }, [props.viewMode, visibleBlocks])
+
+    const isLatestCompletedBoundary = useCallback((messageId: string) => {
+        return latestCompletedBoundaryId === messageId
+    }, [latestCompletedBoundaryId])
+
     useEffect(() => {
         visibleGroupsRef.current = visibleBlocks.filter(isToolGroupBlock)
     }, [visibleBlocks])
@@ -1366,6 +1411,10 @@ function SessionChatInner(props: SessionChatProps) {
                         disabled={sessionInactive}
                         onRefresh={props.onRefresh}
                         onRetryMessage={props.onRetryMessage}
+                        historyActionPending={historyActionPending}
+                        onForkConversation={controlledByUser ? undefined : onForkConversation}
+                        onRewindConversation={controlledByUser ? undefined : onRewindConversation}
+                        isLatestCompletedBoundary={isLatestCompletedBoundary}
                         onViewModeChange={props.onViewModeChange}
                         isSyncingTail={props.isSyncingTail}
                         messagesWarning={props.messagesWarning}
