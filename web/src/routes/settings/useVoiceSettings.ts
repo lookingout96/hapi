@@ -12,7 +12,7 @@ import {
     writeStoredVoiceSelection,
 } from '@/lib/voicePickerPreferences'
 import type { VoiceBackendType } from '@hapi/protocol/voice'
-import { useVoiceInputPreferences } from '@/hooks/useVoiceInputPreferences'
+import { useVoiceInputPreferences, VOICE_LANGUAGE_CHANGE_EVENT } from '@/hooks/useVoiceInputPreferences'
 
 export function useVoiceSettings() {
     const { api } = useAppContext()
@@ -83,6 +83,7 @@ export function useVoiceSettings() {
         setVoiceLanguageState(language.code)
         if (language.code === null) localStorage.removeItem('hapi-voice-lang')
         else localStorage.setItem('hapi-voice-lang', language.code)
+        window.dispatchEvent(new Event(VOICE_LANGUAGE_CHANGE_EVENT))
     }, [])
 
     const stopPreview = useCallback(() => {

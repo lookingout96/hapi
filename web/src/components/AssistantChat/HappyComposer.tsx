@@ -1632,6 +1632,16 @@ export function HappyComposer(props: {
                         voiceStatus={effectiveVoiceStatus}
                     />
 
+                    {dictationActive && dictation.partialTranscript ? (
+                        <div
+                            role="status"
+                            aria-live="polite"
+                            className="mb-2 max-h-20 overflow-y-auto rounded-md bg-[var(--app-subtle-bg)] px-3 py-2 text-sm text-[var(--app-fg)]"
+                        >
+                            {dictation.partialTranscript}
+                        </div>
+                    ) : null}
+
                     {dictationActive && dictation.error ? (
                         <div role="alert" className="mb-2 rounded-md bg-[var(--app-subtle-bg)] px-3 py-2 text-sm text-red-600">
                             {dictation.error}

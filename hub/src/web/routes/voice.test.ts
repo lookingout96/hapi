@@ -100,7 +100,7 @@ describe('voice transcription routes', () => {
         const res = await app.request('/api/voice/transcription/providers', { headers })
         expect(res.status).toBe(200)
         expect(await res.json()).toEqual({ providers: [
-            { id: 'openai', label: 'OpenAI', modes: ['standard'] },
+            { id: 'openai', label: 'OpenAI', modes: ['standard', 'realtime'] },
             { id: 'openai-compatible', label: 'OpenAI-compatible / local', modes: ['standard'] }
         ] })
 
@@ -144,8 +144,13 @@ describe('voice transcription routes', () => {
         expect(upstreamUrl).toBe('https://api.openai.com/v1/audio/transcriptions')
         expect(new Headers(upstreamInit?.headers).get('authorization')).toBe('Bearer server-only-key')
         expect(upstreamInit?.body).toBeInstanceOf(FormData)
-        expect((upstreamInit?.body as FormData).get('model')).toBe('gpt-4o-transcribe')
-        expect((upstreamInit?.body as FormData).get('language')).toBe('zh')
+        expect((upstreamInit?.body as FormData).get('model')).toBe('gpt-transcribe')
+        expect((upstreamInit?.body as FormData).get('languages[]')).toBe('zh-cn')
+
+        form.set('language', 'en-US')
+        const englishRes = await app.request('/api/voice/transcription', { method: 'POST', headers, body: form })
+        expect(englishRes.status).toBe(200)
+        expect((upstreamInit?.body as FormData).get('languages[]')).toBe('en')
 
         global.fetch = originalFetch
         if (previousKey === undefined) delete process.env.OPENAI_API_KEY
@@ -178,6 +183,78 @@ describe('voice transcription routes', () => {
 
         expect(res.status).toBe(413)
         expect(await res.json()).toEqual({ error: 'Audio file too large' })
+    })
+
+    test('mints provider-specific short-lived realtime credentials without exposing API keys', async () => {
+        const app = createApp()
+        const headers = { ...(await authHeaders()), 'content-type': 'application/json' }
+        const previous = {
+            openai: process.env.OPENAI_API_KEY,
+            elevenlabs: process.env.ELEVENLABS_API_KEY,
+            deepgram: process.env.DEEPGRAM_API_KEY
+        }
+        process.env.OPENAI_API_KEY = 'openai-server-key'
+        process.env.ELEVENLABS_API_KEY = 'elevenlabs-server-key'
+        process.env.DEEPGRAM_API_KEY = 'deepgram-server-key'
+        const originalFetch = global.fetch
+        const requests: Array<{ url: string; init?: RequestInit }> = []
+        // @ts-expect-error test override
+        global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input)
+            requests.push({ url, init })
+            if (url.endsWith('/realtime/client_secrets')) {
+                return new Response(JSON.stringify({ value: 'openai-client-token' }), { status: 200 })
+            }
+            if (url.endsWith('/single-use-token/realtime_scribe')) {
+                return new Response(JSON.stringify({ token: 'elevenlabs-client-token' }), { status: 200 })
+            }
+            return new Response(JSON.stringify({ access_token: 'deepgram-client-token' }), { status: 200 })
+        }) as typeof fetch
+
+        for (const provider of ['openai', 'elevenlabs', 'deepgram'] as const) {
+            const res = await app.request('/api/voice/transcription/realtime-token', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ provider, language: 'zh-TW' })
+            })
+            expect(res.status).toBe(200)
+            expect(await res.json()).toEqual({ token: `${provider}-client-token` })
+        }
+        const englishOpenAI = await app.request('/api/voice/transcription/realtime-token', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ provider: 'openai', language: 'en-US' })
+        })
+        expect(englishOpenAI.status).toBe(200)
+
+        expect(requests.map((request) => request.url)).toEqual([
+            'https://api.openai.com/v1/realtime/client_secrets',
+            'https://api.elevenlabs.io/v1/single-use-token/realtime_scribe',
+            'https://api.deepgram.com/v1/auth/grant',
+            'https://api.openai.com/v1/realtime/client_secrets'
+        ])
+        expect(new Headers(requests[0]?.init?.headers).get('authorization')).toBe('Bearer openai-server-key')
+        expect(JSON.parse(String(requests[0]?.init?.body))).toMatchObject({
+            session: {
+                type: 'transcription',
+                audio: { input: { transcription: { model: 'gpt-live-transcribe', languages: ['zh-tw'] } } }
+            }
+        })
+        expect(JSON.parse(String(requests[3]?.init?.body))).toMatchObject({
+            session: { audio: { input: { transcription: { languages: ['en'] } } } }
+        })
+        expect(new Headers(requests[1]?.init?.headers).get('xi-api-key')).toBe('elevenlabs-server-key')
+        expect(new Headers(requests[2]?.init?.headers).get('authorization')).toBe('Token deepgram-server-key')
+
+        global.fetch = originalFetch
+        for (const [key, value] of Object.entries({
+            OPENAI_API_KEY: previous.openai,
+            ELEVENLABS_API_KEY: previous.elevenlabs,
+            DEEPGRAM_API_KEY: previous.deepgram
+        })) {
+            if (value === undefined) delete process.env[key]
+            else process.env[key] = value
+        }
     })
 })
 

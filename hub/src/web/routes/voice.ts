@@ -3,7 +3,13 @@ import { bodyLimit } from 'hono/body-limit'
 import { z } from 'zod'
 import type { WebAppEnv } from '../middleware/auth'
 import {
+    DEEPGRAM_TRANSCRIPTION_MODEL,
+    ELEVENLABS_REALTIME_TRANSCRIPTION_MODEL,
+    ELEVENLABS_TRANSCRIPTION_MODEL,
     ELEVENLABS_API_BASE,
+    GROQ_TRANSCRIPTION_MODEL,
+    OPENAI_REALTIME_TRANSCRIPTION_MODEL,
+    OPENAI_TRANSCRIPTION_MODEL,
     VOICE_AGENT_NAME,
     buildVoiceAgentConfig,
     listConfiguredTranscriptionProviders,
@@ -43,6 +49,7 @@ const transcriptionProviderSchema = z.enum([
     'groq',
     'openai-compatible'
 ])
+const realtimeTranscriptionProviderSchema = z.enum(['openai', 'elevenlabs', 'deepgram'])
 const transcriptionLanguageSchema = z.string()
     .trim()
     .max(35)
@@ -52,9 +59,17 @@ const transcriptionLanguageSchema = z.string()
 const MAX_TRANSCRIPTION_BYTES = 25 * 1024 * 1024
 const MAX_TRANSCRIPTION_BODY_BYTES = MAX_TRANSCRIPTION_BYTES + 1024 * 1024
 const TRANSCRIPTION_TIMEOUT_MS = 120_000
+const REALTIME_TOKEN_TIMEOUT_MS = 15_000
+const MAX_REALTIME_TOKEN_BODY_BYTES = 8 * 1024
 
 function trimTrailingSlash(value: string): string {
     return value.replace(/\/+$/, '')
+}
+
+function normalizeOpenAILanguage(language?: string): string | undefined {
+    const value = language?.toLowerCase()
+    if (!value) return undefined
+    return ['zh-cn', 'zh-tw', 'zh-hk'].includes(value) ? value : value.split('-')[0]
 }
 
 function getTranscriptionConfig(provider: TranscriptionProvider): {
@@ -65,13 +80,13 @@ function getTranscriptionConfig(provider: TranscriptionProvider): {
     if (!listConfiguredTranscriptionProviders(process.env).some((candidate) => candidate.id === provider)) return null
     switch (provider) {
         case 'openai':
-            return { apiKey: process.env.OPENAI_API_KEY!.trim(), baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-transcribe' }
+            return { apiKey: process.env.OPENAI_API_KEY!.trim(), baseUrl: 'https://api.openai.com/v1', model: OPENAI_TRANSCRIPTION_MODEL }
         case 'elevenlabs':
-            return { apiKey: process.env.ELEVENLABS_API_KEY!.trim(), baseUrl: ELEVENLABS_API_BASE, model: 'scribe_v2' }
+            return { apiKey: process.env.ELEVENLABS_API_KEY!.trim(), baseUrl: ELEVENLABS_API_BASE, model: ELEVENLABS_TRANSCRIPTION_MODEL }
         case 'deepgram':
-            return { apiKey: process.env.DEEPGRAM_API_KEY!.trim(), baseUrl: 'https://api.deepgram.com/v1', model: 'nova-3' }
+            return { apiKey: process.env.DEEPGRAM_API_KEY!.trim(), baseUrl: 'https://api.deepgram.com/v1', model: DEEPGRAM_TRANSCRIPTION_MODEL }
         case 'groq':
-            return { apiKey: process.env.GROQ_API_KEY!.trim(), baseUrl: 'https://api.groq.com/openai/v1', model: 'whisper-large-v3' }
+            return { apiKey: process.env.GROQ_API_KEY!.trim(), baseUrl: 'https://api.groq.com/openai/v1', model: GROQ_TRANSCRIPTION_MODEL }
         case 'openai-compatible': {
             const baseUrl = process.env.TRANSCRIPTION_BASE_URL?.trim()
             const model = process.env.TRANSCRIPTION_MODEL?.trim()
@@ -79,6 +94,8 @@ function getTranscriptionConfig(provider: TranscriptionProvider): {
                 ? { apiKey: process.env.TRANSCRIPTION_API_KEY?.trim(), baseUrl: trimTrailingSlash(baseUrl), model }
                 : null
         }
+        case 'browser-local':
+            return null
     }
 }
 
@@ -110,6 +127,7 @@ async function transcribeStandard(
         form.set(provider === 'elevenlabs' ? 'model_id' : 'model', config.model)
         if (baseLanguage) {
             if (provider === 'elevenlabs') form.set('language_code', baseLanguage)
+            else if (provider === 'openai') form.set('languages[]', normalizeOpenAILanguage(language) ?? baseLanguage)
             else form.set('language', baseLanguage)
         }
         url = provider === 'elevenlabs'
@@ -148,6 +166,76 @@ async function transcribeStandard(
             error: error instanceof Error ? error.message : String(error)
         })
         return Response.json({ error: `${provider} transcription request failed` }, { status: 502 })
+    }
+}
+
+async function createRealtimeTranscriptionToken(
+    provider: z.infer<typeof realtimeTranscriptionProviderSchema>,
+    language?: string
+): Promise<Response> {
+    const config = getTranscriptionConfig(provider)
+    if (!config?.apiKey) return Response.json({ error: `${provider} transcription is not configured` }, { status: 400 })
+
+    let url: string
+    let headers: Record<string, string>
+    let body: string | undefined
+
+    switch (provider) {
+        case 'openai': {
+            const openAILanguage = normalizeOpenAILanguage(language)
+            const languages = openAILanguage ? [openAILanguage] : undefined
+            url = 'https://api.openai.com/v1/realtime/client_secrets'
+            headers = { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }
+            body = JSON.stringify({
+                expires_after: { anchor: 'created_at', seconds: 60 },
+                session: {
+                    type: 'transcription',
+                    audio: {
+                        input: {
+                            transcription: {
+                                model: OPENAI_REALTIME_TRANSCRIPTION_MODEL,
+                                delay: 'low',
+                                ...(languages ? { languages } : {})
+                            },
+                            turn_detection: null
+                        }
+                    }
+                }
+            })
+            break
+        }
+        case 'elevenlabs':
+            url = `${ELEVENLABS_API_BASE}/single-use-token/realtime_scribe`
+            headers = { 'xi-api-key': config.apiKey }
+            break
+        case 'deepgram':
+            url = 'https://api.deepgram.com/v1/auth/grant'
+            headers = { Authorization: `Token ${config.apiKey}`, 'Content-Type': 'application/json' }
+            body = '{}'
+            break
+    }
+
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers,
+            body,
+            signal: AbortSignal.timeout(REALTIME_TOKEN_TIMEOUT_MS)
+        })
+        if (!response.ok) {
+            console.warn('[Voice][RealtimeTranscription] Token request failed', { provider, status: response.status })
+            return Response.json({ error: `${provider} realtime transcription token failed (HTTP ${response.status})` }, { status: 502 })
+        }
+        const data = await response.json() as { value?: string; token?: string; access_token?: string }
+        const token = data.value ?? data.token ?? data.access_token
+        if (!token) return Response.json({ error: `${provider} realtime transcription returned no token` }, { status: 502 })
+        return Response.json({ token })
+    } catch (error) {
+        console.warn('[Voice][RealtimeTranscription] Token request error', {
+            provider,
+            error: error instanceof Error ? error.message : String(error)
+        })
+        return Response.json({ error: `${provider} realtime transcription token request failed` }, { status: 502 })
     }
 }
 
@@ -402,6 +490,18 @@ export function createVoiceRoutes(): Hono<WebAppEnv> {
         }
 
         return transcribeStandard(provider.data, file, language.data)
+    })
+
+    app.post('/voice/transcription/realtime-token', bodyLimit({
+        maxSize: MAX_REALTIME_TOKEN_BODY_BYTES,
+        onError: (c) => c.json({ error: 'Realtime token request too large' }, 413)
+    }), async (c) => {
+        const json = await c.req.json().catch(() => null)
+        const provider = realtimeTranscriptionProviderSchema.safeParse(json?.provider)
+        const language = transcriptionLanguageSchema.safeParse(json?.language || undefined)
+        if (!provider.success) return c.json({ error: 'Invalid realtime transcription provider' }, 400)
+        if (!language.success) return c.json({ error: 'Invalid transcription language' }, 400)
+        return createRealtimeTranscriptionToken(provider.data, language.data)
     })
 
     // Get Gemini API key for Gemini Live voice sessions

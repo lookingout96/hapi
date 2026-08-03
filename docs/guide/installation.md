@@ -190,7 +190,7 @@ On first run, HAPI:
 | `DB_PATH` | `~/.hapi/hapi.db` | - | Database file path |
 | `ELEVENLABS_API_KEY` | - | - | ElevenLabs API key for voice |
 | `ELEVENLABS_AGENT_ID` | Auto-created | - | Custom ElevenLabs agent ID |
-| `OPENAI_API_KEY` | - | - | OpenAI API key for dictation (`gpt-4o-transcribe`) |
+| `OPENAI_API_KEY` | - | - | OpenAI API key for dictation (`gpt-transcribe` / `gpt-live-transcribe`) |
 | `DEEPGRAM_API_KEY` | - | - | Deepgram API key for dictation (`nova-3`) |
 | `GROQ_API_KEY` | - | - | Groq API key for dictation (`whisper-large-v3`) |
 | `TRANSCRIPTION_BASE_URL` | - | - | OpenAI-compatible/local transcription base URL |

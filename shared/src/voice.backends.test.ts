@@ -11,11 +11,13 @@ describe('listConfiguredTranscriptionProviders', () => {
         expect(listConfiguredTranscriptionProviders({
             OPENAI_API_KEY: 'openai',
             ELEVENLABS_API_KEY: 'elevenlabs',
+            DEEPGRAM_API_KEY: 'deepgram',
             TRANSCRIPTION_BASE_URL: 'http://localhost:8000/v1',
             TRANSCRIPTION_MODEL: 'whisper-large-v3'
         })).toEqual([
-            { id: 'openai', label: 'OpenAI', modes: ['standard'] },
-            { id: 'elevenlabs', label: 'ElevenLabs', modes: ['standard'] },
+            { id: 'openai', label: 'OpenAI', modes: ['standard', 'realtime'] },
+            { id: 'elevenlabs', label: 'ElevenLabs', modes: ['standard', 'realtime'] },
+            { id: 'deepgram', label: 'Deepgram', modes: ['standard', 'realtime'] },
             { id: 'openai-compatible', label: 'OpenAI-compatible / local', modes: ['standard'] }
         ])
     })

@@ -787,7 +787,7 @@ export default {
   'settings.voice.transcriptionMode.standard': '标准',
   'settings.voice.transcriptionMode.standard.hint': '录音结束后转录（默认）',
   'settings.voice.transcriptionMode.realtime': '实时',
-  'settings.voice.transcriptionMode.realtime.hint': '边说边插入文字',
+  'settings.voice.transcriptionMode.realtime.hint': '说话时显示实时文字，停止后插入最终结果',
   'settings.voice.voices.description': '选择当前后端使用的声音。',
   'settings.voice.sounds.title': '声音效果',
   'settings.voice.responds.title': '对话风格',

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { ConversationStatus } from '@/realtime/types'
 import type { TranscriptionMode, TranscriptionProvider } from '@hapi/protocol/voice'
+import { useRealtimeDictation } from './useRealtimeDictation'
 
 export function appendTranscript(text: string, transcript: string): string {
     const addition = transcript.trim()
@@ -33,10 +34,19 @@ export function useDictation(config: {
     getCurrentText: () => string
     onTextChange: (text: string) => void
 }) {
+    const onFinalTranscript = useCallback((transcript: string) => {
+        config.onTextChange(appendTranscript(config.getCurrentText(), transcript))
+    }, [config])
+    const realtime = useRealtimeDictation({
+        api: config.api,
+        provider: config.provider,
+        mode: config.mode,
+        onFinalTranscript
+    })
     const browserCanRecord = typeof navigator !== 'undefined'
         && typeof navigator.mediaDevices?.getUserMedia === 'function'
         && typeof MediaRecorder !== 'undefined'
-    const supported = config.api !== null
+    const standardSupported = config.api !== null
         && config.provider !== null
         && config.mode === 'standard'
         && browserCanRecord
@@ -55,7 +65,7 @@ export function useDictation(config: {
     }, [])
 
     const start = useCallback(async () => {
-        if (!supported || !config.provider || status === 'connecting' || status === 'connected') return
+        if (!standardSupported || !config.provider || status === 'connecting' || status === 'connected') return
         const operation = ++operationRef.current
         const provider = config.provider
         const language = localStorage.getItem('hapi-voice-lang') || undefined
@@ -122,7 +132,7 @@ export function useDictation(config: {
             setError(startError instanceof Error ? startError.message : 'Could not start transcription')
             setStatus('error')
         }
-    }, [config, status, stopTracks, supported])
+    }, [config, standardSupported, status, stopTracks])
 
     const stop = useCallback(async () => {
         if (transcribingRef.current) return
@@ -155,5 +165,7 @@ export function useDictation(config: {
         }
     }, [stopTracks])
 
-    return { supported, status, error, toggle }
+    return config.mode === 'realtime'
+        ? realtime
+        : { supported: standardSupported, status, error, partialTranscript: '', toggle }
 }

@@ -783,7 +783,7 @@ export default {
   'settings.voice.transcriptionMode.standard': 'Standard',
   'settings.voice.transcriptionMode.standard.hint': 'Record, then transcribe (default)',
   'settings.voice.transcriptionMode.realtime': 'Realtime',
-  'settings.voice.transcriptionMode.realtime.hint': 'Insert text while speaking',
+  'settings.voice.transcriptionMode.realtime.hint': 'Show live text while speaking; insert the final result when stopped',
   'settings.voice.voices.description': 'Choose the voice used by the selected backend.',
   'settings.voice.sounds.title': 'How It Sounds',
   'settings.voice.responds.title': 'How It Responds',

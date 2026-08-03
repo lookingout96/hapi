@@ -60,4 +60,51 @@ describe('useDictation', () => {
         expect(api.transcribeVoice).toHaveBeenCalledOnce()
         expect(stopTrack).toHaveBeenCalled()
     })
+
+    it('shows on-device partial text and inserts only the final transcript', async () => {
+        let recognition: MockSpeechRecognition | null = null
+        class MockSpeechRecognition {
+            static async available() { return 'available' }
+            continuous = false
+            interimResults = false
+            lang = ''
+            processLocally = false
+            onresult: ((event: Event & { results: unknown }) => void) | null = null
+            onerror: ((event: Event) => void) | null = null
+            onend: (() => void) | null = null
+            constructor() { recognition = this }
+            start() {}
+            stop() { this.onend?.() }
+            abort() {}
+            emit(text: string, isFinal: boolean) {
+                const result = Object.assign([{ transcript: text }], { isFinal })
+                this.onresult?.({ results: [result] } as unknown as Event & { results: unknown })
+            }
+        }
+        Object.defineProperty(MockSpeechRecognition.prototype, 'processLocally', {
+            configurable: true,
+            writable: true,
+            value: false
+        })
+        vi.stubGlobal('SpeechRecognition', MockSpeechRecognition)
+
+        const onTextChange = vi.fn()
+        const { result } = renderHook(() => useDictation({
+            api: {} as ApiClient,
+            provider: 'browser-local',
+            mode: 'realtime',
+            getCurrentText: () => 'existing draft',
+            onTextChange
+        }))
+
+        await act(() => result.current.toggle())
+        act(() => recognition?.emit('live words', false))
+        expect(result.current.partialTranscript).toBe('live words')
+        expect(onTextChange).not.toHaveBeenCalled()
+        act(() => recognition?.emit('final words', true))
+        await act(() => result.current.toggle())
+
+        await waitFor(() => expect(onTextChange).toHaveBeenCalledWith('existing draft final words'))
+        expect(result.current.partialTranscript).toBe('')
+    })
 })
