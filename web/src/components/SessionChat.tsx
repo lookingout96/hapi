@@ -45,10 +45,18 @@ import { ScratchlistMigrationBanner } from '@/components/AssistantChat/Scratchli
 import { assignThreadMessageIds, useHappyRuntime } from '@/lib/assistant-runtime'
 import type { OlderLoadOutcome } from '@/lib/message-window-store'
 import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
-import { createScratchlistAttachmentAdapter } from '@/lib/scratchlistAttachmentAdapter'
 import {
+    createScratchlistAttachmentAdapter,
+    type ScratchlistAttachmentAdapter,
+} from '@/lib/scratchlistAttachmentAdapter'
+import {
+    attachmentsNeedScratchlistMigration,
+    finalizeMigratedScratchlistParkCleanup,
+    prepareScratchlistParkAttachments,
     rehydrateScratchlistAttachmentsToComposer,
-    stageScratchlistAttachmentsForComposeSend
+    stageScratchlistAttachmentsForComposeSend,
+    type PendingParkAttachment,
+    type ScratchlistParkResult,
 } from '@/lib/scratchlistAttachmentFlow'
 import type { ScratchlistEntry } from '@/lib/scratchlist'
 import { isHubScratchlistAttachmentPath } from '@hapi/protocol'
@@ -202,6 +210,11 @@ export function isScratchlistHotkeyBlockedTarget(target: EventTarget | null): bo
  * Decide whether a submit should be routed to the per-session scratchlist
  * or to the regular chat send. Scratchlist entries support text and hub-
  * stored attachments; scheduled sends still fall through to chat.
+ *
+ * Chat-path chips attached before scratchlist mode are migrated in the
+ * park-before-clear path (`prepareScratchlistParkAttachments`, #1226).
+ * This predicate still rejects non-hub paths as a fail-closed backstop
+ * for any leftover composer.send() route.
  *
  * Pure / exported so it can be unit tested without mounting SessionChat.
  */
@@ -548,14 +561,16 @@ function SessionChatInner(props: SessionChatProps) {
         }
     }, [allSessions, t])
     const [scratchlistMode, setScratchlistMode] = useState(false)
+    const [isScratchlistParking, setIsScratchlistParking] = useState(false)
     // Mode resets across sessions implicitly: SessionChat is keyed by
     // session.id at the public-export boundary, so a session switch
     // remounts SessionChatInner from scratch and `scratchlistMode`
     // initializes to false again. (Previous effect-based reset was
     // racy on first paint - see public-export comment for context.)
     const handleScratchlistToggle = useCallback(() => {
+        if (isScratchlistParking) return
         setScratchlistMode((m) => !m)
-    }, [])
+    }, [isScratchlistParking])
     /**
      * Global keyboard shortcut: Ctrl/Cmd + Shift + S toggles scratchlist
      * mode (open/close drawer + flip composer routing).
@@ -580,6 +595,7 @@ function SessionChatInner(props: SessionChatProps) {
      */
     useEffect(() => {
         const onKeyDown = (e: globalThis.KeyboardEvent) => {
+            if (isScratchlistParking) return
             if (!isScratchlistToggleHotkey(e)) return
             if (isScratchlistHotkeyBlockedTarget(e.target)) return
             e.preventDefault()
@@ -587,7 +603,7 @@ function SessionChatInner(props: SessionChatProps) {
         }
         window.addEventListener('keydown', onKeyDown)
         return () => window.removeEventListener('keydown', onKeyDown)
-    }, [])
+    }, [isScratchlistParking])
     /**
      * onSend wrapper: when scratchlist mode is on AND the submission is
      * not scheduled, route to scratchlist (text and/or hub attachments).
@@ -598,15 +614,98 @@ function SessionChatInner(props: SessionChatProps) {
      * they can keep adding entries while sticky-mode is on. If add()
      * returns false (empty after trim, at-cap), we resolve false so
      * the composer keeps its text and the operator can fix it.
+     *
+     * Chat-path chips attached before scratchlist mode are migrated in
+     * the scratchlist attachment adapter's send() (#1226). If any
+     * non-hub path still reaches this wrapper, fail closed — never park
+     * text-only and clear chips.
      */
+    // Stable handle so HappyComposer can release parked chips without
+    // deleting hub blobs when clearAttachments() calls adapter.remove().
+    const scratchlistAdapterRef = useRef<ScratchlistAttachmentAdapter | null>(null)
+
+    /**
+     * Park from a live composer snapshot *before* assistant-ui's
+     * `composer.send()` empties text/chips. Returning false leaves the
+     * composer intact for retry (at-cap / hub error).
+     */
+    const onParkScratchlist = useCallback(
+        async (
+            text: string,
+            pending: readonly PendingParkAttachment[],
+        ): Promise<ScratchlistParkResult> => {
+            let prepared
+            try {
+                prepared = await prepareScratchlistParkAttachments(
+                    props.api,
+                    props.session.id,
+                    pending,
+                )
+            } catch {
+                return false
+            }
+            let aborted = false
+            const abort = async () => {
+                if (aborted) return
+                aborted = true
+                await finalizeMigratedScratchlistParkCleanup(
+                    props.api,
+                    props.session.id,
+                    prepared,
+                    false,
+                )
+            }
+            return {
+                abort,
+                commit: async () => {
+                    const accepted = await scratchlist.add(text, prepared)
+                    if (!accepted) {
+                        await abort()
+                        return false
+                    }
+                    return true
+                },
+                beforeClear: async () => {
+                    await finalizeMigratedScratchlistParkCleanup(
+                        props.api,
+                        props.session.id,
+                        prepared,
+                        true,
+                    )
+                    scratchlistAdapterRef.current?.releaseWithoutDelete(
+                        pending.map((chip) => chip.id),
+                    )
+                },
+            }
+        },
+        [props.api, props.session.id, scratchlist],
+    )
+
     const onSendForComposer = useCallback(
         async (
             text: string,
             attachments?: AttachmentMetadata[],
             scheduledAt?: number | null,
         ): Promise<boolean> => {
+            if (
+                scratchlistMode
+                && scheduledAt == null
+                && attachmentsNeedScratchlistMigration(attachments)
+            ) {
+                return false
+            }
             if (shouldRouteToScratchlist(scratchlistMode, attachments, scheduledAt)) {
-                return scratchlist.add(text, attachments)
+                // Legacy path if something still calls composer.send() while
+                // scratchlist mode is on. Prefer onParkScratchlist (clears
+                // only after accept).
+                const accepted = await scratchlist.add(text, attachments)
+                await finalizeMigratedScratchlistParkCleanup(
+                    props.api,
+                    props.session.id,
+                    attachments,
+                    accepted,
+                )
+                return accepted
             }
             // If the user uploaded while scratchlist mode was on, then toggled
             // it off before send, pending items still carry hub paths. Stage
@@ -1334,11 +1433,16 @@ function SessionChatInner(props: SessionChatProps) {
 
     const attachmentAdapter = useMemo(() => {
         if (!props.session.active) {
+            scratchlistAdapterRef.current = null
             return undefined
         }
-        return scratchlistMode
-            ? createScratchlistAttachmentAdapter(props.api, props.session.id)
-            : createAttachmentAdapter(props.api, props.session.id)
+        if (scratchlistMode) {
+            const adapter = createScratchlistAttachmentAdapter(props.api, props.session.id)
+            scratchlistAdapterRef.current = adapter
+            return adapter
+        }
+        scratchlistAdapterRef.current = null
+        return createAttachmentAdapter(props.api, props.session.id)
     }, [props.api, props.session.id, props.session.active, scratchlistMode])
 
     const runtime = useHappyRuntime({
@@ -1396,7 +1500,7 @@ function SessionChatInner(props: SessionChatProps) {
 
             <AssistantRuntimeProvider runtime={runtime}>
                 <ShareSeedConsumer sessionId={props.session.id} sessionActive={props.session.active} />
-                <DragDropZone disabled={sessionInactive || props.isSending || pendingSchedule != null}>
+                <DragDropZone disabled={sessionInactive || props.isSending || pendingSchedule != null || isScratchlistParking}>
 
                     <HappyThread
                         // Key with prefix: different components under the same session
@@ -1472,7 +1576,7 @@ function SessionChatInner(props: SessionChatProps) {
                                     onDelete={scratchlist.remove}
                                     onSend={props.onSend}
                                     onExitScratchlistMode={() => setScratchlistMode(false)}
-                                    disabled={props.isSending}
+                                    disabled={props.isSending || isScratchlistParking}
                                 />
                             ) : null}
                             <QueuedMessagesBar
@@ -1639,6 +1743,8 @@ function SessionChatInner(props: SessionChatProps) {
                         scratchlistMode={scratchlistMode}
                         scratchlistCount={scratchlist.entries.length}
                         onScratchlistToggle={handleScratchlistToggle}
+                        onParkScratchlist={onParkScratchlist}
+                        onScratchlistParkingChange={setIsScratchlistParking}
                         sendError={props.sendError ?? null}
                         onClearSendError={props.onClearSendError}
                         onSuppressSendErrorRestore={props.onSuppressSendErrorRestore}

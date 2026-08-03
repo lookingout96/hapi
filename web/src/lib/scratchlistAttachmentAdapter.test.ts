@@ -297,3 +297,103 @@ describe('createScratchlistAttachmentAdapter', () => {
         expect(deleteScratchlistAttachment).toHaveBeenCalledWith('session-1', 'hub-race')
     })
 })
+
+describe('createScratchlistAttachmentAdapter.send migrates chat-path chips (#1226)', () => {
+    it('uploads pending chat-path file to hub scratchlist and returns hub metadata', async () => {
+        const hubAttachment = {
+            id: 'hub-migrated',
+            filename: 'before-mode.png',
+            mimeType: 'image/png',
+            size: 4,
+            path: 'hapi-hub:scratchlist/default/session-1/hub-migrated-before-mode.png',
+        }
+        const uploadScratchlistAttachment = vi.fn().mockResolvedValue({
+            success: true,
+            attachment: hubAttachment,
+        })
+        const deleteUploadFile = vi.fn().mockResolvedValue(undefined)
+        const api = { uploadScratchlistAttachment, deleteUploadFile } as never
+        const adapter = createScratchlistAttachmentAdapter(api, 'session-1')
+        const file = new File([new Uint8Array([137, 80, 78, 71])], 'before-mode.png', { type: 'image/png' })
+
+        const complete = await adapter.send({
+            id: 'composer-chat-1',
+            type: 'file',
+            name: 'before-mode.png',
+            contentType: 'image/png',
+            file,
+            status: { type: 'requires-action', reason: 'composer-send' },
+            path: '/tmp/hapi-blobs/session-1/before-mode.png',
+            previewUrl: 'data:image/png;base64,iVBORw0KGgo=',
+        } as never)
+
+        expect(uploadScratchlistAttachment).toHaveBeenCalledWith(
+            'session-1',
+            'before-mode.png',
+            expect.any(String),
+            'image/png',
+        )
+        // Chat-path cleanup is deferred until scratchlist.add succeeds (#1226 review).
+        expect(deleteUploadFile).not.toHaveBeenCalled()
+        expect(complete.content).toEqual([
+            {
+                type: 'text',
+                text: JSON.stringify({
+                    __attachmentMetadata: {
+                        ...hubAttachment,
+                        previewUrl: 'data:image/png;base64,iVBORw0KGgo=',
+                        migratedFromPath: '/tmp/hapi-blobs/session-1/before-mode.png',
+                    },
+                }),
+            },
+        ])
+    })
+
+    it('throws when chat-path migrate upload fails so park does not silently drop', async () => {
+        const uploadScratchlistAttachment = vi.fn().mockResolvedValue({
+            success: false,
+            error: 'quota',
+        })
+        const api = { uploadScratchlistAttachment, deleteUploadFile: vi.fn() } as never
+        const adapter = createScratchlistAttachmentAdapter(api, 'session-1')
+        const file = new File([new Uint8Array([1])], 'x.png', { type: 'image/png' })
+
+        await expect(adapter.send({
+            id: 'composer-chat-2',
+            type: 'file',
+            name: 'x.png',
+            contentType: 'image/png',
+            file,
+            status: { type: 'requires-action', reason: 'composer-send' },
+            path: '/tmp/hapi-blobs/x.png',
+        } as never)).rejects.toThrow(/quota|Failed to migrate/i)
+    })
+
+    it('releaseWithoutDelete makes remove a no-op so clearAttachments keeps parked hubs', async () => {
+        const deleteScratchlistAttachment = vi.fn()
+        const deleteUploadFile = vi.fn()
+        const api = { deleteScratchlistAttachment, deleteUploadFile } as never
+        const adapter = createScratchlistAttachmentAdapter(api, 'session-1')
+        const pending = {
+            id: 'composer-hub-1',
+            type: 'file' as const,
+            name: 'a.png',
+            contentType: 'image/png',
+            status: { type: 'requires-action' as const, reason: 'composer-send' as const },
+            path: 'hapi-hub:scratchlist/default/session-1/hub-1-a.png',
+            hubAttachment: {
+                id: 'hub-1',
+                filename: 'a.png',
+                mimeType: 'image/png',
+                size: 1,
+                path: 'hapi-hub:scratchlist/default/session-1/hub-1-a.png',
+            },
+        }
+
+        adapter.releaseWithoutDelete([pending.id])
+        await adapter.remove(pending as never)
+
+        expect(deleteScratchlistAttachment).not.toHaveBeenCalled()
+        expect(deleteUploadFile).not.toHaveBeenCalled()
+    })
+})

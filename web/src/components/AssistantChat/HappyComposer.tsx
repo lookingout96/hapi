@@ -38,6 +38,8 @@ import { StatusBar } from '@/components/AssistantChat/StatusBar'
 import { ComposerButtons } from '@/components/AssistantChat/ComposerButtons'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { AttachmentItem } from '@/components/AssistantChat/AttachmentItem'
+import { ComposerParkingContext } from '@/components/AssistantChat/composerParkingContext'
+import type { ScratchlistParkResult } from '@/lib/scratchlistAttachmentFlow'
 import { useTranslation } from '@/lib/use-translation'
 import { getModelOptionsForFlavor, getNextModelForFlavor } from './modelOptions'
 import { getClaudeComposerEffortOptions } from './claudeEffortOptions'
@@ -142,6 +144,18 @@ export function useRichComposerBridge(
 }
 
 const defaultSuggestionHandler = async (): Promise<Suggestion[]> => []
+
+/** True when composer text/attachment ids match a pre-park snapshot. */
+export function composerParkSnapshotUnchanged(
+    snapshot: { text: string; attachments: readonly { id: string }[] },
+    current: { text: string; attachments: readonly { id: string }[] },
+): boolean {
+    return current.text === snapshot.text
+        && current.attachments.length === snapshot.attachments.length
+        && current.attachments.every(
+            (attachment, index) => attachment.id === snapshot.attachments[index]?.id,
+        )
+}
 
 export function ModelEffortSettingsSection(props: {
     agentFlavor?: string | null
@@ -260,6 +274,16 @@ export function HappyComposer(props: {
     scratchlistMode?: boolean
     scratchlistCount?: number
     onScratchlistToggle?: () => void
+    /**
+     * Prepare a scratchlist park (migrate only). Caller validates the
+     * composer snapshot, then commit()/abort()/beforeClear().
+     */
+    onParkScratchlist?: (
+        text: string,
+        pending: readonly import('@assistant-ui/react').Attachment[],
+    ) => Promise<ScratchlistParkResult>
+    /** Parent disables DragDropZone / scratchlist promote while park is in flight. */
+    onScratchlistParkingChange?: (parking: boolean) => void
     // Set when the most recent send failed (4xx/5xx/network).  The composer
     // restores the original text once per `sendError.id` and renders an
     // inline error affordance until the user dismisses or starts editing.
@@ -373,7 +397,15 @@ export function HappyComposer(props: {
         }
     }, [dictationActive, voiceInput.voiceMode, voiceStatus, onVoiceToggle, dictation.status, dictation.toggle])
 
-    const controlsDisabled = disabled || (!active && !allowSendWhenInactive) || threadIsDisabled
+    const [isParkingScratchlist, setIsParkingScratchlist] = useState(false)
+    const parkInFlightRef = useRef(false)
+    const onScratchlistParkingChange = props.onScratchlistParkingChange
+
+    useEffect(() => {
+        onScratchlistParkingChange?.(isParkingScratchlist)
+    }, [isParkingScratchlist, onScratchlistParkingChange])
+
+    const controlsDisabled = disabled || (!active && !allowSendWhenInactive) || threadIsDisabled || isParkingScratchlist
     const trimmed = composerText.trim()
     const hasText = trimmed.length > 0
     const hasAttachments = attachments.length > 0
@@ -843,10 +875,48 @@ export function HappyComposer(props: {
         ? undefined
         : handleUserClearSchedule
 
-    /** Flush rich chips → `[title](/sessions/<id>)` into composer.text, then send. */
-    const flushAndSend = useCallback(() => {
+    const handleSend = useCallback(async () => {
+        // Rich chips must be serialized into composer.text before any send or
+        // scratchlist park snapshot (RichComposerInput contract).
         if (richMentionsEnabled && richInputRef.current) {
             richInputRef.current.flushSerializedText()
+        }
+
+        // Scratchlist parks must not go through assistant-ui's send(): it
+        // empties text/chips before onNew, so a rejected add cannot restore
+        // retryable composer state (#1226 Major).
+        if (
+            props.scratchlistMode
+            && pendingSchedule == null
+            && props.onParkScratchlist
+        ) {
+            if (!canSend || parkInFlightRef.current) return
+            parkInFlightRef.current = true
+            setIsParkingScratchlist(true)
+            try {
+                const snapshot = api.composer().getState()
+                const prepared = await props.onParkScratchlist(
+                    snapshot.text,
+                    snapshot.attachments,
+                )
+                if (!prepared) return
+                // Validate before irreversible add — otherwise a mid-flight
+                // composer edit leaves a parked duplicate while chips remain.
+                if (!composerParkSnapshotUnchanged(snapshot, api.composer().getState())) {
+                    await prepared.abort()
+                    return
+                }
+                if (!await prepared.commit()) {
+                    return
+                }
+                await prepared.beforeClear()
+                api.composer().setText('')
+                await api.composer().clearAttachments()
+            } finally {
+                parkInFlightRef.current = false
+                setIsParkingScratchlist(false)
+            }
+            return
         }
         // A retry intentionally clears composer state synchronously. It is
         // neither a replacement draft nor a dismissal: route onSuccess/onError
@@ -860,7 +930,31 @@ export function HappyComposer(props: {
             userAttachmentGeneration: userAttachmentGenerationRef.current,
         }
         api.composer().send()
-    }, [api, attachments, onSuppressSendErrorRestore, richMentionsEnabled, sendError])
+        // SessionChat owns clearing the schedule — it clears only after awaiting
+        // the send hook's accepted result, which covers both pre-mutation guards
+        // and async inactive-session resume failure. Clearing here unconditionally
+        // would race ahead of that check and drop the user's schedule on every
+        // rejected send path.
+        //
+        // The inline send-error affordance is intentionally NOT cleared here:
+        // the route-level state (`onSuccess`/`onError` in router.tsx) replaces
+        // or clears it based on the actual mutation result, so the user keeps
+        // the error context while the new attempt is in flight.
+    }, [
+        api,
+        attachments,
+        canSend,
+        onSuppressSendErrorRestore,
+        pendingSchedule,
+        props.onParkScratchlist,
+        props.scratchlistMode,
+        richMentionsEnabled,
+        sendError,
+    ])
+
+    const flushAndSend = useCallback(() => {
+        void handleSend()
+    }, [handleSend])
 
     const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement | HTMLDivElement>) => {
         const key = e.key
@@ -956,7 +1050,7 @@ export function HappyComposer(props: {
         permissionMode,
         permissionModes,
         canSend,
-        api,
+        handleSend,
         haptic,
         composerEnterBehavior,
         richMentionsEnabled,
@@ -1121,20 +1215,6 @@ export function HappyComposer(props: {
     )
     const showAbortButton = true
     const voiceEnabled = Boolean(effectiveVoiceToggle)
-
-    const handleSend = useCallback(() => {
-        flushAndSend()
-        // SessionChat owns clearing the schedule — it clears only after awaiting
-        // the send hook's accepted result, which covers both pre-mutation guards
-        // and async inactive-session resume failure. Clearing here unconditionally
-        // would race ahead of that check and drop the user's schedule on every
-        // rejected send path.
-        //
-        // The inline send-error affordance is intentionally NOT cleared here:
-        // the route-level state (`onSuccess`/`onError` in router.tsx) replaces
-        // or clears it based on the actual mutation result, so the user keeps
-        // the error context while the new attempt is in flight.
-    }, [flushAndSend])
 
     // Pi: selected model info for UI labels and thinking level filtering
     const piModelLabel = agentFlavor === 'pi'
@@ -1608,6 +1688,7 @@ export function HappyComposer(props: {
         : 'max-h-[7.5rem] min-h-[1.5rem] flex-1 overflow-y-auto whitespace-pre-wrap break-words bg-transparent text-base leading-snug text-[var(--app-fg)] focus:outline-none'
 
     return (
+        <ComposerParkingContext.Provider value={isParkingScratchlist}>
         <div className={shellClassName} data-testid="composer-shell" data-expanded={isExpanded || undefined}>
             <div className={innerClassName}>
                 <ComposerPrimitive.Root className={rootClassName} onSubmit={handleSubmit}>
@@ -1784,5 +1865,6 @@ export function HappyComposer(props: {
                 </ComposerPrimitive.Root>
             </div>
         </div>
+        </ComposerParkingContext.Provider>
     )
 }
