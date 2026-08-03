@@ -13,6 +13,8 @@ import { langAlias, useShikiHighlighter } from '@/lib/shiki'
 import { useTranslation } from '@/lib/use-translation'
 import { decodeBase64 } from '@/lib/utils'
 import { ImagePreview } from '@/components/ImagePreview'
+import { PdfPreview } from '@/components/PdfPreview'
+import { DocxPreview } from '@/components/DocxPreview'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
 import {
     getInitialMarkdownPreviewMode,
@@ -150,6 +152,12 @@ function resolveImageMimeType(path: string): string | null {
     return IMAGE_MIME_BY_EXTENSION[ext] ?? null
 }
 
+function resolveFileExtension(path: string): string | null {
+    const parts = path.split('.')
+    if (parts.length <= 1) return null
+    return parts[parts.length - 1]?.toLowerCase() ?? null
+}
+
 function getUtf8ByteLength(value: string): number {
     return new TextEncoder().encode(value).length
 }
@@ -184,6 +192,8 @@ export default function FilePage() {
     const filePath = useMemo(() => decodePath(encodedPath), [encodedPath])
     const fileName = filePath.split('/').pop() || filePath || t('file.page.fallbackName')
     const imageMimeType = useMemo(() => resolveImageMimeType(filePath), [filePath])
+    const fileExtension = useMemo(() => resolveFileExtension(filePath), [filePath])
+    const documentFile = fileExtension === 'pdf' || fileExtension === 'docx'
     const markdownFile = useMemo(() => isMarkdownFile(filePath), [filePath])
 
     const diffQuery = useQuery({
@@ -225,11 +235,11 @@ export default function FilePage() {
         ? `data:${imageMimeType};base64,${fileContentResult.content}`
         : null
 
-    const language = useMemo(() => imageMimeType ? undefined : resolveLanguage(filePath), [filePath, imageMimeType])
+    const language = useMemo(() => imageMimeType || documentFile ? undefined : resolveLanguage(filePath), [documentFile, filePath, imageMimeType])
     const [markdownMode, setMarkdownMode] = useState<MarkdownPreviewMode>(getInitialMarkdownPreviewMode)
     const showMarkdownSource = !markdownFile || markdownMode === 'source'
     const highlighted = useShikiHighlighter(
-        imageMimeType || (markdownFile && !showMarkdownSource) ? '' : decodedContent,
+        imageMimeType || documentFile || (markdownFile && !showMarkdownSource) ? '' : decodedContent,
         language
     )
     const contentSizeBytes = useMemo(
@@ -251,7 +261,7 @@ export default function FilePage() {
     }
 
     useEffect(() => {
-        if (imageMimeType) {
+        if (imageMimeType || documentFile) {
             setDisplayMode('file')
             return
         }
@@ -262,7 +272,7 @@ export default function FilePage() {
         if (diffFailed) {
             setDisplayMode('file')
         }
-    }, [diffSuccess, diffFailed, diffContent, imageMimeType])
+    }, [diffSuccess, diffFailed, diffContent, documentFile, imageMimeType])
 
     const loading = diffQuery.isLoading || fileQuery.isLoading
     const fileError = fileContentResult && !fileContentResult.success
@@ -383,6 +393,10 @@ export default function FilePage() {
                                 fileName={fileName}
                                 label={t('file.page.imagePreviewAlt', { name: fileName })}
                             />
+                        ) : fileExtension === 'pdf' && fileContentResult?.content ? (
+                            <PdfPreview content={fileContentResult.content} fileName={fileName} />
+                        ) : fileExtension === 'docx' && fileContentResult?.content ? (
+                            <DocxPreview content={fileContentResult.content} fileName={fileName} />
                         ) : binaryFile ? (
                             <div className="text-sm text-[var(--app-hint)]">
                                 {t('file.page.binary')}
