@@ -10,6 +10,7 @@ import { doctorCommand } from './doctor'
 import { kimiCommand } from './kimi'
 import { grokCommand } from './grok'
 import { opencodeCommand } from './opencode'
+import { hermesCommand } from './hermes'
 import { piCommand } from './pi'
 import { hookForwarderCommand } from './hookForwarder'
 import { mcpCommand } from './mcp'
@@ -42,6 +43,7 @@ const COMMANDS: CommandDefinition[] = [
     cursorCommand,
     removedGeminiCommand,
     grokCommand,
+    hermesCommand,
     kimiCommand,
     opencodeCommand,
     piCommand,

@@ -12,6 +12,7 @@ export type Capability = typeof Capabilities[keyof typeof Capabilities]
 const FLAVOR_CAPS: Record<AgentFlavor, ReadonlySet<Capability>> = {
     claude: new Set([Capabilities.ModelChange, Capabilities.Effort]),
     gemini: new Set([Capabilities.ModelChange]),
+    hermes: new Set([Capabilities.ModelChange]),
     kimi: new Set([Capabilities.ModelChange]),
     grok: new Set([Capabilities.ModelChange, Capabilities.Effort]),
     codex: new Set([Capabilities.ModelChange]),
@@ -24,6 +25,7 @@ const FLAVOR_CAPS: Record<AgentFlavor, ReadonlySet<Capability>> = {
 const FLAVOR_LABELS: Record<AgentFlavor, string> = {
     claude: 'Claude',
     gemini: 'Gemini',
+    hermes: 'Hermes',
     kimi: 'Kimi',
     grok: 'Grok Build',
     codex: 'Codex',
@@ -60,6 +62,7 @@ export function isCodexFamilyFlavor(flavor: string | null | undefined): boolean 
     return flavor === 'codex'
         || flavor === 'gemini'
         || flavor === 'grok'
+        || flavor === 'hermes'
         || flavor === 'kimi'
         || flavor === 'opencode'
 }

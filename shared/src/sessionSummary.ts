@@ -112,6 +112,7 @@ const AGENT_SESSION_ID_FIELD_BY_FLAVOR = {
     claude: 'claudeSessionId',
     codex: 'codexSessionId',
     gemini: 'geminiSessionId',
+    hermes: 'hermesSessionId',
     opencode: 'opencodeSessionId',
     grok: 'grokSessionId',
     cursor: 'cursorSessionId',

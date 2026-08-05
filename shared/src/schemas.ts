@@ -53,6 +53,7 @@ export const MetadataSchema = z.object({
     codexSourceSessionId: z.string().optional(),
     geminiSessionId: z.string().optional(),
     opencodeSessionId: z.string().optional(),
+    hermesSessionId: z.string().optional(),
     grokSessionId: z.string().optional(),
     cursorSessionId: z.string().optional(),
     cursorSessionProtocol: z.enum(['acp', 'stream-json']).optional(),
