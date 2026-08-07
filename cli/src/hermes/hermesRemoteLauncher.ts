@@ -253,7 +253,7 @@ class HermesRemoteLauncher extends RemoteLauncherBase {
         session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListHermesModels, async () => {
             const metadata = backend.getSessionModelsMetadata?.(acpSessionId);
             if (!metadata) {
-                return { success: false, error: 'OpenCode model metadata is not available' };
+                return { success: false, error: 'Hermes model metadata is not available' };
             }
             return {
                 success: true,

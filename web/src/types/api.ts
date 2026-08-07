@@ -24,6 +24,8 @@ export type {
     GrokModelSummary,
     GrokReasoningEffortResponse,
     GrokReasoningEffortOption,
+    HermesModelsResponse,
+    HermesModelSummary,
     ListDirectoryResponse,
     MachineDirectoryEntry,
     MachineListDirectoryResponse,

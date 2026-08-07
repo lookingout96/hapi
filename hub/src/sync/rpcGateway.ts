@@ -74,6 +74,7 @@ export type RpcListCursorModelsResponse = CursorModelsResponse
 export type RpcCursorChatStoreStatus = CursorChatStoreStatus
 export type RpcOpencodeModel = OpencodeModelSummary
 export type RpcListOpencodeModelsResponse = OpencodeModelsResponse
+export type RpcListHermesModelsResponse = OpencodeModelsResponse
 export type RpcListGrokModelsResponse = GrokModelsResponse
 export type RpcListGrokReasoningEffortOptionsResponse = GrokReasoningEffortResponse
 export type RpcListOpencodeReasoningEffortOptionsResponse = OpencodeReasoningEffortResponse
@@ -348,6 +349,14 @@ export class RpcGateway {
 
     async listOpencodeModelsForCwd(machineId: string, cwd: string): Promise<RpcListOpencodeModelsResponse> {
         return await this.machineRpc(machineId, RPC_METHODS.ListOpencodeModelsForCwd, { cwd }) as RpcListOpencodeModelsResponse
+    }
+
+    async listHermesModelsForSession(sessionId: string): Promise<RpcListHermesModelsResponse> {
+        return await this.sessionRpc(sessionId, RPC_METHODS.ListHermesModels, {}) as RpcListHermesModelsResponse
+    }
+
+    async listHermesModelsForCwd(machineId: string, cwd: string): Promise<RpcListHermesModelsResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ListHermesModelsForCwd, { cwd }) as RpcListHermesModelsResponse
     }
 
     async listGrokModelsForCwd(machineId: string, cwd: string): Promise<RpcListGrokModelsResponse> {

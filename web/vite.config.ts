@@ -7,7 +7,7 @@ import { shareTargetPathnameFromBase } from './src/lib/sharePath'
 
 const base = process.env.VITE_BASE_URL || '/'
 const shareAction = shareTargetPathnameFromBase(base)
-const hubTarget = process.env.VITE_HUB_PROXY || 'http://127.0.0.1:3006'
+const hubTarget = process.env.VITE_HUB_PROXY || 'http://127.0.0.1:8443'
 const appVersion = readAppVersion()
 
 function readAppVersion(): string {
@@ -52,7 +52,7 @@ export default defineConfig({
     },
     server: {
         host: true,
-        allowedHosts: ['hapidev.weishu.me'],
+        allowedHosts: ['hapidev.weishu.me', 'REDACTED_LAN_IP', 'REDACTED_HOST', 'localhost'],
         proxy: {
             '/api': {
                 target: hubTarget,

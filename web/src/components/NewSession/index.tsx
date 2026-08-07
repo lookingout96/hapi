@@ -9,6 +9,7 @@ import { useSpawnSession } from '@/hooks/mutations/useSpawnSession'
 import { useCodexModels } from '@/hooks/queries/useCodexModels'
 import { useCursorModelsForMachine } from '@/hooks/queries/useCursorModelsForMachine'
 import { useOpencodeModelsForCwd } from '@/hooks/queries/useOpencodeModelsForCwd'
+import { useHermesModelsForCwd } from '@/hooks/queries/useHermesModelsForCwd'
 import { useGrokModelsForCwd } from '@/hooks/queries/useGrokModelsForCwd'
 import { useSessions } from '@/hooks/queries/useSessions'
 import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggestions'
@@ -48,6 +49,7 @@ import { ModelSelector } from './ModelSelector'
 import { OpencodeModelSelector } from './OpencodeModelSelector'
 import { LaunchEffortSelector } from './LaunchEffortSelector'
 import { shouldEnableOpencodeModelDiscovery } from './opencodeModelsGate'
+import { shouldEnableHermesModelDiscovery } from './hermesModelsGate'
 import { buildGrokEffortOptions, buildGrokModelOptions, shouldEnableGrokModelDiscovery } from './grokModels'
 import { ReasoningEffortSelector } from './ReasoningEffortSelector'
 import {
@@ -204,7 +206,7 @@ export function NewSession(props: {
         setEffort(draft.effort)
         setModelReasoningEffort(draft.modelReasoningEffort)
         setOpencodeSelectedModel(
-            draft.agent === 'opencode' && draft.model !== 'auto' ? draft.model : null
+            (draft.agent === 'opencode' || draft.agent === 'hermes') && draft.model !== 'auto' ? draft.model : null
         )
         setServiceTier(draft.serviceTier)
         setCollaborationMode(draft.collaborationMode)
@@ -492,6 +494,18 @@ export function NewSession(props: {
             cwdExists: deferredDirectoryExists,
         })
     })
+    const hermesModelsState = useHermesModelsForCwd({
+        api: props.api,
+        machineId,
+        cwd: deferredDirectory,
+        enabled: shouldEnableHermesModelDiscovery({
+            agent,
+            machineId,
+            cwd: deferredDirectory,
+            cwdExists: deferredDirectoryExists,
+        })
+    })
+    const acpModelsState = agent === 'hermes' ? hermesModelsState : opencodeModelsState
     const grokModelsState = useGrokModelsForCwd({
         api: props.api,
         machineId,
@@ -528,41 +542,41 @@ export function NewSession(props: {
         // Restore a remembered model when it is still advertised for this cwd;
         // otherwise auto-pick the backend default.
         if (
-            agent !== 'opencode'
+            (agent !== 'opencode' && agent !== 'hermes')
             || deferredDirectoryExists !== true
-            || opencodeModelsState.isLoading
-            || opencodeModelsState.error
+            || acpModelsState.isLoading
+            || acpModelsState.error
         ) {
             return
         }
         if (
             opencodeSelectedModel !== null
-            && opencodeModelsState.availableModels.some(
+            && acpModelsState.availableModels.some(
                 (candidate) => candidate.modelId === opencodeSelectedModel
             )
         ) {
             return
         }
         const rememberedModel = machineId
-            ? loadPreferredLaunchSettings(machineId, 'opencode')?.model
+            ? loadPreferredLaunchSettings(machineId, agent)?.model
             : null
         const rememberedModelAvailable = rememberedModel
             && rememberedModel !== 'auto'
-            && opencodeModelsState.availableModels.some(
+            && acpModelsState.availableModels.some(
                 (candidate) => candidate.modelId === rememberedModel
             )
         const fallback = (rememberedModelAvailable ? rememberedModel : null)
-            ?? opencodeModelsState.currentModelId
-            ?? opencodeModelsState.availableModels[0]?.modelId
+            ?? acpModelsState.currentModelId
+            ?? acpModelsState.availableModels[0]?.modelId
             ?? null
         setOpencodeSelectedModel(fallback)
     }, [
         agent,
         deferredDirectoryExists,
-        opencodeModelsState.availableModels,
-        opencodeModelsState.currentModelId,
-        opencodeModelsState.error,
-        opencodeModelsState.isLoading,
+        acpModelsState.availableModels,
+        acpModelsState.currentModelId,
+        acpModelsState.error,
+        acpModelsState.isLoading,
         opencodeSelectedModel,
         machineId
     ])
@@ -584,12 +598,12 @@ export function NewSession(props: {
             loadPreferredLaunchSettings(machineId, agent)
         )
 
-        setModel(agent === 'opencode' ? 'auto' : preferred.model)
+        setModel(agent === 'opencode' || agent === 'hermes' ? 'auto' : preferred.model)
         setCursorSelectedBase(preferred.cursorSelectedBase)
         setEffort(preferred.effort)
         setModelReasoningEffort(preferred.modelReasoningEffort)
         setOpencodeSelectedModel(
-            agent === 'opencode' && preferred.model !== 'auto' ? preferred.model : null
+            (agent === 'opencode' || agent === 'hermes') && preferred.model !== 'auto' ? preferred.model : null
         )
     }, [agent, machineId])
 
@@ -955,7 +969,7 @@ export function NewSession(props: {
         }
         saveNewSessionFormDraft({
             agent,
-            model: agent === 'opencode' ? (opencodeSelectedModel ?? 'auto') : model,
+            model: agent === 'opencode' || agent === 'hermes' ? (opencodeSelectedModel ?? 'auto') : model,
             cursorSelectedBase,
             machineId,
             effort,
@@ -1078,7 +1092,7 @@ export function NewSession(props: {
                 return
             }
 
-            const resolvedModel = agent === 'opencode'
+            const resolvedModel = agent === 'opencode' || agent === 'hermes'
                 ? (opencodeSelectedModel ?? undefined)
                 : (model !== 'auto' ? model : undefined)
             const resolvedEffort = (agent === 'claude' || agent === 'grok') && effort !== 'auto'
@@ -1088,7 +1102,7 @@ export function NewSession(props: {
                 ? modelReasoningEffort
                 : undefined
             const preferredLaunchSettings = {
-                model: agent === 'opencode' ? (opencodeSelectedModel ?? 'auto') : model,
+                model: agent === 'opencode' || agent === 'hermes' ? (opencodeSelectedModel ?? 'auto') : model,
                 cursorSelectedBase,
                 effort,
                 modelReasoningEffort
@@ -1189,12 +1203,12 @@ export function NewSession(props: {
                 deferredDirectoryExists === undefined
                 || (deferredDirectoryExists === true && grokModelsState.isLoading)
             ))
-        || (agent === 'opencode'
+        || ((agent === 'opencode' || agent === 'hermes')
             && deferredDirectory !== ''
             && opencodeSelectedModel !== null
             && (
                 deferredDirectoryExists === undefined
-                || (deferredDirectoryExists === true && opencodeModelsState.isLoading)
+                || (deferredDirectoryExists === true && acpModelsState.isLoading)
             ))
     const fastModeSelectionPending = agent === 'codex'
         && serviceTier === 'fast'
@@ -1264,17 +1278,17 @@ export function NewSession(props: {
                     onClear={() => setSelectedCodexImportSessionId(null)}
                 />
             ) : null}
-            {agent === 'opencode' ? (
+            {agent === 'opencode' || agent === 'hermes' ? (
                 <OpencodeModelSelector
                     cwd={deferredDirectory}
                     machineId={machineId}
-                    isLoading={opencodeModelsState.isLoading}
-                    error={opencodeModelsState.error}
-                    availableModels={opencodeModelsState.availableModels}
-                    currentModelId={opencodeModelsState.currentModelId}
+                    isLoading={acpModelsState.isLoading}
+                    error={acpModelsState.error}
+                    availableModels={acpModelsState.availableModels}
+                    currentModelId={acpModelsState.currentModelId}
                     selectedModel={opencodeSelectedModel}
                     onModelChange={setOpencodeSelectedModel}
-                    onRetry={opencodeModelsState.refetch}
+                    onRetry={acpModelsState.refetch}
                 />
             ) : (
                 agent === 'cursor' ? (

@@ -9,6 +9,8 @@ export interface ListOpencodeModelsForCwdRequest {
 }
 
 export type ListOpencodeModelsForCwdResponse = OpencodeModelsResponse;
+export type ListHermesModelsForCwdRequest = ListOpencodeModelsForCwdRequest;
+export type ListHermesModelsForCwdResponse = OpencodeModelsResponse;
 
 interface CacheEntry {
     expiresAt: number;
@@ -83,9 +85,9 @@ function extractModelsFromResponse(response: unknown): {
     };
 }
 
-async function runOpencodeProbe(cwd: string): Promise<ListOpencodeModelsForCwdResponse> {
+async function runAcpModelProbe(cwd: string, flavor: 'opencode' | 'hermes'): Promise<ListOpencodeModelsForCwdResponse> {
     const transport = new AcpStdioTransport({
-        command: 'opencode',
+        command: flavor,
         args: ['acp']
     });
 
@@ -97,13 +99,13 @@ async function runOpencodeProbe(cwd: string): Promise<ListOpencodeModelsForCwdRe
                 terminal: false
             },
             clientInfo: {
-                name: 'hapi-opencode-models',
+                name: `hapi-${flavor}-models`,
                 version: packageJson.version
             }
         }, { timeoutMs: PROBE_TIMEOUT_MS });
 
         if (!isObject(initResponse) || typeof initResponse.protocolVersion !== 'number') {
-            return { success: false, error: 'Invalid initialize response from opencode acp' };
+            return { success: false, error: `Invalid initialize response from ${flavor} acp` };
         }
 
         const newResponse = await transport.sendRequest('session/new', {
@@ -133,29 +135,31 @@ async function runOpencodeProbe(cwd: string): Promise<ListOpencodeModelsForCwdRe
  * cwd are coalesced via a single-flight promise so we never spawn more than
  * one probe at a time per cwd.
  */
-export async function listOpencodeModelsForCwd(
-    cwd: string
+async function listAcpModelsForCwd(
+    cwd: string,
+    flavor: 'opencode' | 'hermes'
 ): Promise<ListOpencodeModelsForCwdResponse> {
     const trimmed = cwd?.trim();
     if (!trimmed) {
         return { success: false, error: 'cwd is required' };
     }
 
-    const cached = cache.get(trimmed);
+    const cacheKey = `${flavor}:${trimmed}`;
+    const cached = cache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
         return cached.response;
     }
 
-    const existing = inflight.get(trimmed);
+    const existing = inflight.get(cacheKey);
     if (existing) {
         return existing;
     }
 
     const promise = (async () => {
         try {
-            const response = await runOpencodeProbe(trimmed);
+            const response = await runAcpModelProbe(trimmed, flavor);
             if (response.success) {
-                cache.set(trimmed, {
+                cache.set(cacheKey, {
                     expiresAt: Date.now() + CACHE_TTL_MS,
                     response
                 });
@@ -164,15 +168,23 @@ export async function listOpencodeModelsForCwd(
         } catch (error) {
             return {
                 success: false,
-                error: getErrorMessage(error, 'Failed to discover OpenCode models')
+                error: getErrorMessage(error, `Failed to discover ${flavor === 'opencode' ? 'OpenCode' : 'Hermes'} models`)
             } satisfies ListOpencodeModelsForCwdResponse;
         } finally {
-            inflight.delete(trimmed);
+            inflight.delete(cacheKey);
         }
     })();
 
-    inflight.set(trimmed, promise);
+    inflight.set(cacheKey, promise);
     return promise;
+}
+
+export async function listOpencodeModelsForCwd(cwd: string): Promise<ListOpencodeModelsForCwdResponse> {
+    return await listAcpModelsForCwd(cwd, 'opencode');
+}
+
+export async function listHermesModelsForCwd(cwd: string): Promise<ListHermesModelsForCwdResponse> {
+    return await listAcpModelsForCwd(cwd, 'hermes');
 }
 
 /**

@@ -64,6 +64,16 @@ describe('buildCliArgs', () => {
         expect(args).toContain('ollama/exaone:4.5-33b-q8')
     })
 
+    it('uses the Hermes command and passes its selected model', () => {
+        const args = buildCliArgs('hermes', {
+            directory: '/tmp',
+            model: 'ollama/exaone:4.5-33b-q8',
+        })
+        expect(args[0]).toBe('hermes')
+        expect(args).toContain('--model')
+        expect(args).toContain('ollama/exaone:4.5-33b-q8')
+    })
+
 
 
     it('passes --model-reasoning-effort through for opencode', () => {

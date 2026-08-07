@@ -40,7 +40,7 @@ export class HermesSession extends AgentSessionBase<HermesMode> {
             onModeChange: opts.onModeChange,
             mode: opts.mode,
             sessionLabel: 'HermesSession',
-            sessionIdLabel: 'OpenCode',
+            sessionIdLabel: 'Hermes',
             applySessionIdToMetadata: (metadata, sessionId) => ({
                 ...metadata,
                 hermesSessionId: sessionId

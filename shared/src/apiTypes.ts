@@ -629,6 +629,12 @@ export type OpencodeModelsResponse = {
 
 export type ListOpencodeModelsResponse = OpencodeModelsResponse
 
+export type HermesModelSummary = OpencodeModelSummary
+
+export type HermesModelsResponse = OpencodeModelsResponse
+
+export type ListHermesModelsResponse = HermesModelsResponse
+
 export type GrokModelSummary = {
     modelId: string
     name?: string
@@ -668,6 +674,8 @@ export type OpencodeReasoningEffortResponse = {
     currentValue?: string | null
     error?: string
 }
+
+export type HermesReasoningEffortResponse = OpencodeReasoningEffortResponse
 
 export type CursorModelSummary = OpencodeModelSummary
 

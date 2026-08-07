@@ -1320,6 +1320,8 @@ export function buildCliArgs(
           ? 'kimi'
           : agent === 'opencode'
             ? 'opencode'
+            : agent === 'hermes'
+              ? 'hermes'
             : agent === 'pi'
               ? 'pi'
               : 'claude';
@@ -1343,7 +1345,7 @@ export function buildCliArgs(
   args.push('--hapi-starting-mode', 'remote', '--started-by', 'runner');
   // Codex, Cursor ACP, Pi native resume, and Claude message-level forks
   // reuse the original HAPI row via --existing-session-id.
-  if (agent === 'codex' || agent === 'cursor' || agent === 'pi'
+  if (agent === 'codex' || agent === 'cursor' || agent === 'pi' || agent === 'hermes'
       || (agentCommand === 'claude' && options.forkSession)) {
     const existingSessionId = options.existingSessionId ?? options.sessionId;
     if (existingSessionId) {

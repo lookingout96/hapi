@@ -36,6 +36,7 @@ import {
     type RpcArchiveCodexSessionResponse,
     type RpcListCursorModelsResponse,
     type RpcListOpencodeModelsResponse,
+    type RpcListHermesModelsResponse,
     type RpcListGrokModelsResponse,
     type RpcListGrokReasoningEffortOptionsResponse,
     type RpcListOpencodeReasoningEffortOptionsResponse,
@@ -63,6 +64,7 @@ export type {
     RpcListCodexModelsResponse,
     RpcListCursorModelsResponse,
     RpcListOpencodeModelsResponse,
+    RpcListHermesModelsResponse,
     RpcListGrokModelsResponse,
     RpcListGrokReasoningEffortOptionsResponse,
     RpcListOpencodeReasoningEffortOptionsResponse,
@@ -2888,6 +2890,14 @@ async uploadScratchlistAttachment(
 
     async listOpencodeModelsForCwd(machineId: string, cwd: string): Promise<RpcListOpencodeModelsResponse> {
         return await this.rpcGateway.listOpencodeModelsForCwd(machineId, cwd)
+    }
+
+    async listHermesModelsForSession(sessionId: string): Promise<RpcListHermesModelsResponse> {
+        return await this.rpcGateway.listHermesModelsForSession(sessionId)
+    }
+
+    async listHermesModelsForCwd(machineId: string, cwd: string): Promise<RpcListHermesModelsResponse> {
+        return await this.rpcGateway.listHermesModelsForCwd(machineId, cwd)
     }
 
     async listGrokModelsForCwd(machineId: string, cwd: string): Promise<RpcListGrokModelsResponse> {

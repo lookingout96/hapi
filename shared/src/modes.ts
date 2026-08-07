@@ -141,6 +141,9 @@ export function getPermissionModesForFlavor(flavor?: string | null): readonly Pe
         // no permission modes are offered.
         return []
     }
+    if (flavor === 'hermes') {
+        return ['default']
+    }
     return CLAUDE_PERMISSION_MODES
 }
 

@@ -96,6 +96,15 @@ vi.mock('@/hooks/queries/useOpencodeModelsForCwd', () => ({
         refetch: vi.fn()
     })
 }))
+vi.mock('@/hooks/queries/useHermesModelsForCwd', () => ({
+    useHermesModelsForCwd: () => ({
+        availableModels: [],
+        currentModelId: null,
+        isLoading: false,
+        error: null,
+        refetch: vi.fn()
+    })
+}))
 vi.mock('@/hooks/queries/useGrokModelsForCwd', () => ({
     useGrokModelsForCwd: () => ({
         availableModels: [],

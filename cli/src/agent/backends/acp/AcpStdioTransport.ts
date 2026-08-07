@@ -39,9 +39,10 @@ export type AcpStderrError = {
 };
 
 /** @internal Exported for regression tests. */
-export function buildAcpStdioSpawnOptions(env?: Record<string, string>): SpawnOptions {
+export function buildAcpStdioSpawnOptions(env?: Record<string, string>, cwd?: string): SpawnOptions {
     return {
         env,
+        cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: process.platform === 'win32',
         windowsHide: process.platform === 'win32'
@@ -80,12 +81,13 @@ export class AcpStdioTransport {
         command: string;
         args?: string[];
         env?: Record<string, string>;
+        cwd?: string;
     }) {
         this.shouldGuardAgentCli = options.command === 'agent';
         this.process = spawn(
             options.command,
             options.args ?? [],
-            buildAcpStdioSpawnOptions(options.env)
+            buildAcpStdioSpawnOptions(options.env, options.cwd)
         ) as ChildProcessWithoutNullStreams;
 
         if (this.shouldGuardAgentCli) {

@@ -118,6 +118,7 @@ export class AcpSdkBackend implements AgentBackend {
         args?: string[];
         env?: Record<string, string>;
         textChunkMode?: AcpTextChunkMode;
+        cwd?: string;
     }) {}
 
     async initialize(): Promise<void> {
@@ -126,7 +127,8 @@ export class AcpSdkBackend implements AgentBackend {
         this.transport = new AcpStdioTransport({
             command: this.options.command,
             args: this.options.args,
-            env: this.options.env
+            env: this.options.env,
+            cwd: this.options.cwd
         });
 
         this.transport.onNotification((method, params) => {

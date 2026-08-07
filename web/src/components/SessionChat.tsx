@@ -89,6 +89,7 @@ import {
 } from '@/lib/sessionChatCursorModel'
 import { buildCursorEffortPickerOptions, resolveCursorVariantOptions } from '@/lib/cursorModelOptions'
 import { useOpencodeModels } from '@/hooks/queries/useOpencodeModels'
+import { useHermesModels } from '@/hooks/queries/useHermesModels'
 import { useGrokModels } from '@/hooks/queries/useGrokModels'
 import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
 import { usePiModels } from '@/hooks/queries/usePiModels'
@@ -777,21 +778,28 @@ function SessionChatInner(props: SessionChatProps) {
         sessionId: props.session.id,
         enabled: agentFlavor === 'opencode' && props.session.active
     })
+    const hermesModelsState = useHermesModels({
+        api: props.api,
+        sessionId: props.session.id,
+        enabled: agentFlavor === 'hermes' && props.session.active
+    })
     const opencodeReasoningEffortState = useOpencodeReasoningEffortOptions({
         api: props.api,
         sessionId: props.session.id,
         enabled: agentFlavor === 'opencode' && props.session.active
     })
     const opencodeModelOptions = useMemo(() => {
-        if (agentFlavor !== 'opencode') {
+        if (agentFlavor !== 'opencode' && agentFlavor !== 'hermes') {
             return undefined
         }
-
-        return opencodeModelsState.availableModels.map((opencodeModel) => ({
+        const models = agentFlavor === 'hermes'
+            ? hermesModelsState.availableModels
+            : opencodeModelsState.availableModels
+        return models.map((opencodeModel) => ({
             value: opencodeModel.modelId,
             label: opencodeModel.name ?? opencodeModel.modelId
         }))
-    }, [agentFlavor, opencodeModelsState.availableModels])
+    }, [agentFlavor, hermesModelsState.availableModels, opencodeModelsState.availableModels])
     const grokModelsState = useGrokModels({
         api: props.api,
         sessionId: props.session.id,
@@ -1616,7 +1624,7 @@ function SessionChatInner(props: SessionChatProps) {
                                             ? undefined
                                             : cursorPicker.modelOptions
                                     )
-                                    : agentFlavor === 'opencode'
+                                    : agentFlavor === 'opencode' || agentFlavor === 'hermes'
                                         ? opencodeModelOptions
                                         : agentFlavor === 'grok'
                                             ? grokModelOptions

@@ -10,6 +10,8 @@ function decodeBase64Buffer(content: string): ArrayBuffer {
     return bytes.buffer
 }
 
+const MAX_DOCX_PREVIEW_BYTES = 50 * 1024 * 1024
+
 export function DocxPreview(props: { content: string; fileName: string }) {
     const [html, setHtml] = useState<string | null>(null)
     const [error, setError] = useState<string | null>(null)
@@ -18,6 +20,12 @@ export function DocxPreview(props: { content: string; fileName: string }) {
         let cancelled = false
         setHtml(null)
         setError(null)
+
+        if (props.content.length > MAX_DOCX_PREVIEW_BYTES) {
+            const sizeInMb = (props.content.length / (1024 * 1024)).toFixed(1)
+            setError(`Document is too large to preview (${sizeInMb} MB). Download the file to view it locally.`)
+            return
+        }
 
         const convertDocument = async () => {
             try {

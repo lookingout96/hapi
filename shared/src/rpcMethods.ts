@@ -34,10 +34,13 @@ export const RPC_METHODS = {
     ListPiModels: 'listPiModels',
     ListOpencodeModels: 'listOpencodeModels',
     ListOpencodeModelsForCwd: 'listOpencodeModelsForCwd',
+    ListHermesModels: 'listHermesModels',
+    ListHermesModelsForCwd: 'listHermesModelsForCwd',
     ListGrokModelsForCwd: 'listGrokModelsForCwd',
     ListGrokModels: 'listGrokModels',
     ListGrokReasoningEffortOptions: 'listGrokReasoningEffortOptions',
     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
+    ListHermesReasoningEffortOptions: 'listHermesReasoningEffortOptions',
     ForkConversation: 'fork-conversation',
     RewindConversation: 'rewind-conversation',
 } as const

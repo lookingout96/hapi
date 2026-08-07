@@ -14,6 +14,8 @@ function decodeBase64Bytes(content: string): Uint8Array {
     return bytes
 }
 
+const MAX_PDF_PREVIEW_BYTES = 50 * 1024 * 1024
+
 function PdfPage(props: { page: PDFPageProxy; pageNumber: number; fileName: string }) {
     const containerRef = useRef<HTMLDivElement>(null)
     const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -82,6 +84,12 @@ export function PdfPreview(props: { content: string; fileName: string }) {
         setPages([])
         setError(null)
 
+        if (props.content.length > MAX_PDF_PREVIEW_BYTES) {
+            const sizeInMb = (props.content.length / (1024 * 1024)).toFixed(1)
+            setError(`PDF is too large to preview (${sizeInMb} MB). Download the file to view it locally.`)
+            return
+        }
+
         const loadPdf = async () => {
             try {
                 loadedDocument = await pdfjs.getDocument({ data: decodeBase64Bytes(props.content) }).promise
@@ -109,8 +117,21 @@ export function PdfPreview(props: { content: string; fileName: string }) {
         }
     }, [props.content])
 
-    if (error) return <div className="text-sm text-[var(--app-hint)]">{error}</div>
-    if (!document) return <div className="text-sm text-[var(--app-hint)]">Loading PDF preview...</div>
+    if (error) {
+        return (
+            <div className="flex min-h-48 items-center justify-center rounded-md border border-[var(--app-border)] bg-[var(--app-subtle-bg)] p-3">
+                <div className="text-sm text-[var(--app-hint)]">{error}</div>
+            </div>
+        )
+    }
+    if (!document) {
+        const sizeInMb = (props.content.length / (1024 * 1024)).toFixed(1)
+        return (
+            <div className="flex min-h-48 items-center justify-center rounded-md border border-[var(--app-border)] bg-[var(--app-subtle-bg)] p-3">
+                <div className="text-sm text-[var(--app-hint)]">Loading PDF preview... ({sizeInMb} MB)</div>
+            </div>
+        )
+    }
 
     return (
         <div className="flex min-h-48 flex-col items-center gap-4 overflow-auto rounded-md border border-[var(--app-border)] bg-[var(--app-subtle-bg)] p-3">

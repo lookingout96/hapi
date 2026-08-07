@@ -9,13 +9,13 @@ import type { AgentBackend, PromptContent } from '@/agent/types';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { getHappyCliCommand } from '@/utils/spawnHappyCLI';
 import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler';
-import { bootstrapSession } from '@/agent/sessionFactory';
+import { bootstrapExistingSession, bootstrapSession } from '@/agent/sessionFactory';
 import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import { PermissionModeSchema } from '@hapi/protocol/schemas';
 import { isPermissionModeAllowedForFlavor } from '@hapi/protocol';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
-import type { SessionEndReason } from '@hapi/protocol';
+import type { AgentFlavor, SessionEndReason } from '@hapi/protocol';
 function emitReadyIfIdle(props: {
     queueSize: () => number;
     shouldExit: boolean;
@@ -31,18 +31,34 @@ function emitReadyIfIdle(props: {
 export async function runAgentSession(opts: {
     agentType: string;
     startedBy?: 'runner' | 'terminal';
+    startingMode?: 'local' | 'remote';
     permissionMode?: SessionPermissionMode;
+    model?: string;
+    resumeSessionId?: string;
+    existingSessionId?: string;
+    workingDirectory?: string;
 }): Promise<void> {
-    const workingDirectory = getInvokedCwd();
+    const workingDirectory = opts.workingDirectory ?? getInvokedCwd()
+    const startedBy = opts.startedBy ?? 'terminal'
+    const startingMode: 'local' | 'remote' = opts.startingMode
+        ?? (startedBy === 'runner' ? 'remote' : 'local')
     const initialState: AgentState = {
         controlledByUser: false
     };
-    const { session, sessionInfo } = await bootstrapSession({
-        flavor: opts.agentType,
-        startedBy: opts.startedBy ?? 'terminal',
-        workingDirectory,
-        agentState: initialState
-    });
+    const bootstrap = opts.existingSessionId
+        ? await bootstrapExistingSession({
+            sessionId: opts.existingSessionId,
+            flavor: opts.agentType,
+            startedBy,
+            workingDirectory
+        })
+        : await bootstrapSession({
+            flavor: opts.agentType,
+            startedBy: opts.startedBy ?? 'terminal',
+            workingDirectory,
+            agentState: initialState
+        });
+    const { session, sessionInfo } = bootstrap;
 
     session.updateAgentState((currentState) => ({
         ...currentState,
@@ -50,6 +66,7 @@ export async function runAgentSession(opts: {
     }));
 
     const messageQueue = new MessageQueue2<Record<string, never>>(() => hashObject({}));
+    messageQueue.onBatchConsumed = (localIds) => session.emitMessagesConsumed(localIds);
 
     session.onUserMessage((message, localId) => {
         const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
@@ -91,10 +108,28 @@ export async function runAgentSession(opts: {
         }
     ];
 
-    const agentSessionId = await backend.newSession({
-        cwd: workingDirectory,
-        mcpServers
-    });
+    const agentSessionId = opts.resumeSessionId && (backend as { supportsLoadSession?: () => boolean }).supportsLoadSession?.()
+        ? await backend.loadSession({
+            sessionId: opts.resumeSessionId,
+            cwd: workingDirectory,
+            mcpServers
+        })
+        : await backend.newSession({
+            cwd: workingDirectory,
+            mcpServers
+        });
+    if (opts.model && backend.setModel) {
+        await backend.setModel(agentSessionId, opts.model, { flavor: opts.agentType as AgentFlavor });
+    }
+
+    if (opts.agentType === 'hermes') {
+        session.rpcHandlerManager.registerHandler(RPC_METHODS.ListHermesModels, async () => {
+            const metadata = backend.getSessionModelsMetadata?.(agentSessionId);
+            return metadata
+                ? { success: true, availableModels: metadata.availableModels, currentModelId: metadata.currentModelId }
+                : { success: false, error: 'Hermes model metadata is not available' };
+        });
+    }
 
     let thinking = false;
     let shouldExit = false;
@@ -117,14 +152,26 @@ export async function runAgentSession(opts: {
         if (!payload || typeof payload !== 'object') {
             throw new Error('Invalid session config payload');
         }
-        const config = payload as { permissionMode?: unknown };
+        const config = payload as { permissionMode?: unknown; model?: unknown };
 
         if (config.permissionMode !== undefined) {
             currentPermissionMode = resolvePermissionMode(config.permissionMode);
         }
 
+        if (config.model !== undefined) {
+            if (typeof config.model !== 'string' || !config.model.trim() || !backend.setModel) {
+                throw new Error('Invalid or unsupported model');
+            }
+            await backend.setModel(agentSessionId, config.model, { flavor: opts.agentType as AgentFlavor });
+        }
+
         syncKeepAlive();
-        return { applied: { permissionMode: currentPermissionMode } };
+        return {
+            applied: {
+                permissionMode: currentPermissionMode,
+                ...(typeof config.model === 'string' ? { model: config.model } : {})
+            }
+        };
     });
 
     syncKeepAlive();

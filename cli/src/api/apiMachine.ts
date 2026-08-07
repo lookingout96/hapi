@@ -27,6 +27,9 @@ import { RpcHandlerManager } from './rpc/RpcHandlerManager'
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers'
 import {
     listOpencodeModelsForCwd,
+    listHermesModelsForCwd,
+    type ListHermesModelsForCwdRequest,
+    type ListHermesModelsForCwdResponse,
     type ListOpencodeModelsForCwdRequest,
     type ListOpencodeModelsForCwdResponse
 } from '../modules/common/opencodeModels'
@@ -252,6 +255,19 @@ export class ApiMachineClient {
                 }
 
                 return await listOpencodeModelsForCwd(resolvedCwd)
+            }
+        )
+
+        this.rpcHandlerManager.registerHandler<ListHermesModelsForCwdRequest, ListHermesModelsForCwdResponse>(
+            RPC_METHODS.ListHermesModelsForCwd,
+            async (params) => {
+                const rawCwd = typeof params?.cwd === 'string' ? params.cwd.trim() : ''
+                if (!rawCwd) return { success: false, error: 'cwd is required' }
+                const resolvedCwd = await this.resolveForWorkspaceCheck(rawCwd)
+                if (!this.isWithinWorkspaceRoots(resolvedCwd)) {
+                    return { success: false, error: 'Path is outside workspace roots' }
+                }
+                return await listHermesModelsForCwd(resolvedCwd)
             }
         )
 

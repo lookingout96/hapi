@@ -9,6 +9,8 @@ import { validatePath } from '../pathSecurity'
 import { getGeneratedImage } from '../generatedImages'
 import { getErrorMessage, rpcError } from '../rpcResponses'
 
+const MAX_FILE_READ_BYTES = 50 * 1024 * 1024
+
 interface ReadFileRequest {
     path: string
 }
@@ -44,6 +46,11 @@ export function registerFileHandlers(rpcHandlerManager: RpcHandlerManager, worki
 
         try {
             const resolvedPath = resolve(workingDirectory, data.path)
+            const fileStat = await stat(resolvedPath)
+            if (fileStat.size > MAX_FILE_READ_BYTES) {
+                const sizeInMb = (fileStat.size / (1024 * 1024)).toFixed(1)
+                return rpcError(`File is too large to preview (${sizeInMb} MB, max ${MAX_FILE_READ_BYTES / (1024 * 1024)} MB)`)
+            }
             const buffer = await readFile(resolvedPath)
             const content = buffer.toString('base64')
             return { success: true, content }

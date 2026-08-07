@@ -35,6 +35,7 @@ import type {
     GitCommandResponse,
     GrokModelsResponse,
     GrokReasoningEffortResponse,
+    HermesModelsResponse,
     ListDirectoryResponse,
     MachineListDirectoryResponse,
     MachinePathsExistsResponse,
@@ -718,6 +719,12 @@ export class ApiClient {
         )
     }
 
+    async getSessionHermesModels(sessionId: string): Promise<HermesModelsResponse> {
+        return await this.request<HermesModelsResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/hermes-models`
+        )
+    }
+
     async getSessionOpencodeReasoningEffortOptions(sessionId: string): Promise<OpencodeReasoningEffortResponse> {
         return await this.request<OpencodeReasoningEffortResponse>(
             `/api/sessions/${encodeURIComponent(sessionId)}/opencode-reasoning-effort-options`
@@ -747,6 +754,12 @@ export class ApiClient {
     async getMachineOpencodeModelsForCwd(machineId: string, cwd: string): Promise<OpencodeModelsResponse> {
         return await this.request<OpencodeModelsResponse>(
             `/api/machines/${encodeURIComponent(machineId)}/opencode-models?cwd=${encodeURIComponent(cwd)}`
+        )
+    }
+
+    async getMachineHermesModelsForCwd(machineId: string, cwd: string): Promise<HermesModelsResponse> {
+        return await this.request<HermesModelsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/hermes-models?cwd=${encodeURIComponent(cwd)}`
         )
     }
 

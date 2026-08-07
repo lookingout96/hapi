@@ -89,7 +89,10 @@ export function useTerminalSocket(options: UseTerminalSocketOptions): {
         })
     }, [])
 
+    const errorReasonRef = useRef<string | null>(null)
+
     const setErrorState = useCallback((message: string) => {
+        errorReasonRef.current = message
         setState({ status: 'error', error: message })
     }, [])
 
@@ -133,6 +136,7 @@ export function useTerminalSocket(options: UseTerminalSocketOptions): {
         setState({ status: 'connecting' })
 
         socket.on('connect', () => {
+            errorReasonRef.current = null
             const size = lastSizeRef.current ?? { cols, rows }
             setState({ status: 'connecting' })
             emitCreate(socket, size)
@@ -174,7 +178,11 @@ export function useTerminalSocket(options: UseTerminalSocketOptions): {
 
         socket.on('disconnect', (reason) => {
             if (reason === 'io client disconnect') {
+                errorReasonRef.current = null
                 setState({ status: 'idle' })
+                return
+            }
+            if (errorReasonRef.current) {
                 return
             }
             setErrorState(`Disconnected: ${reason}`)
@@ -205,6 +213,7 @@ export function useTerminalSocket(options: UseTerminalSocketOptions): {
         if (!socket) {
             return
         }
+        errorReasonRef.current = null
         socket.removeAllListeners()
         socket.disconnect()
         socketRef.current = null
