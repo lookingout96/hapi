@@ -38,6 +38,60 @@ function isNotBoundError(error: unknown): boolean {
 }
 
 const ACCESS_TOKEN_PREFIX = 'hapi_access_token::'
+const AUTH_SESSION_PREFIX = 'hapi_auth_session::'
+
+type CachedAuth = {
+    token: string
+    user: AuthResponse['user']
+}
+
+function authSourceFingerprint(source: AuthSource): string {
+    const value = source.type === 'telegram' ? source.initData : source.token
+    let hash = 2166136261
+    for (let i = 0; i < value.length; i += 1) {
+        hash ^= value.charCodeAt(i)
+        hash = Math.imul(hash, 16777619)
+    }
+    return `${source.type}:${(hash >>> 0).toString(36)}`
+}
+
+function authSessionKey(baseUrl: string, source: AuthSource): string {
+    return `${AUTH_SESSION_PREFIX}${baseUrl}::${authSourceFingerprint(source)}`
+}
+
+function readCachedAuth(baseUrl: string, source: AuthSource): CachedAuth | null {
+    try {
+        const raw = sessionStorage.getItem(authSessionKey(baseUrl, source))
+        if (!raw) return null
+        const cached = JSON.parse(raw) as Partial<CachedAuth>
+        if (typeof cached.token !== 'string' || !cached.user) return null
+        const expMs = decodeJwtExpMs(cached.token)
+        if (!expMs || expMs <= Date.now()) {
+            sessionStorage.removeItem(authSessionKey(baseUrl, source))
+            return null
+        }
+        return cached as CachedAuth
+    } catch {
+        return null
+    }
+}
+
+function writeCachedAuth(baseUrl: string, source: AuthSource, auth: CachedAuth): void {
+    if (!decodeJwtExpMs(auth.token)) return
+    try {
+        sessionStorage.setItem(authSessionKey(baseUrl, source), JSON.stringify(auth))
+    } catch {
+        // Ignore unavailable/full storage; network authentication remains the fallback.
+    }
+}
+
+function clearCachedAuth(baseUrl: string, source: AuthSource): void {
+    try {
+        sessionStorage.removeItem(authSessionKey(baseUrl, source))
+    } catch {
+        // Ignore storage errors.
+    }
+}
 
 function rememberAccessToken(baseUrl: string, accessToken: string): void {
     try {
@@ -64,6 +118,7 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
     const refreshPromiseRef = useRef<Promise<string | null> | null>(null)
     const tokenRef = useRef<string | null>(null)
     const lastRefreshAttemptRef = useRef<number>(0)
+    const previousBaseUrlRef = useRef(baseUrl)
 
     // Stable reference for auth source to use in effects
     const authSourceRef = useRef(authSource)
@@ -105,6 +160,7 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
                 tokenRef.current = auth.token
                 setToken(auth.token)
                 setUser(auth.user)
+                writeCachedAuth(baseUrl, currentSource, auth)
                 setError(null)
                 setNeedsBinding(false)
                 return auth.token
@@ -119,6 +175,7 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
                 }
                 const isExpired = expMs ? Date.now() >= expMs : false
                 if (options?.hardFail || isExpired) {
+                    clearCachedAuth(baseUrl, currentSource)
                     tokenRef.current = null
                     setToken(null)
                     setUser(null)
@@ -158,6 +215,7 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
             tokenRef.current = auth.token
             setToken(auth.token)
             setUser(auth.user)
+            writeCachedAuth(baseUrl, currentSource, auth)
             setNeedsBinding(false)
             // Persist the CLI access token so Settings → Companion pairing QR
             // can encode the same long-lived token in the deeplink. The PWA
@@ -197,7 +255,13 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
                 return
             }
 
-            setIsLoading(true)
+            const cached = readCachedAuth(baseUrl, authSource)
+            if (cached) {
+                tokenRef.current = cached.token
+                setToken(cached.token)
+                setUser(cached.user)
+            }
+            setIsLoading(!cached)
             setError(null)
             setNeedsBinding(false)
             try {
@@ -206,6 +270,8 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
                 if (isCancelled) return
                 setToken(auth.token)
                 setUser(auth.user)
+                tokenRef.current = auth.token
+                writeCachedAuth(baseUrl, authSource, auth)
                 setNeedsBinding(false)
             } catch (e) {
                 if (isCancelled) return
@@ -216,8 +282,10 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
                     setNeedsBinding(true)
                     return
                 }
-                setNeedsBinding(false)
-                setError(e instanceof Error ? e.message : 'Auth failed')
+                if (!cached) {
+                    setNeedsBinding(false)
+                    setError(e instanceof Error ? e.message : 'Auth failed')
+                }
             } finally {
                 if (!isCancelled) {
                     setIsLoading(false)
@@ -233,6 +301,8 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
     }, [authSource, baseUrl])
 
     useEffect(() => {
+        if (previousBaseUrlRef.current === baseUrl) return
+        previousBaseUrlRef.current = baseUrl
         tokenRef.current = null
         refreshPromiseRef.current = null
         lastRefreshAttemptRef.current = 0

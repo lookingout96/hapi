@@ -14,7 +14,7 @@ function decodeBase64Bytes(content: string): Uint8Array {
     return bytes
 }
 
-const MAX_PDF_PREVIEW_BYTES = 50 * 1024 * 1024
+const MAX_PDF_PREVIEW_BYTES = 30 * 1024 * 1024
 
 function PdfPage(props: { page: PDFPageProxy; pageNumber: number; fileName: string }) {
     const containerRef = useRef<HTMLDivElement>(null)

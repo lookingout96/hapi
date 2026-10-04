@@ -27,7 +27,7 @@ export async function runHermes(opts: {
         agentType: 'hermes',
         startedBy,
         startingMode: opts.startingMode,
-        permissionMode: opts.permissionMode === 'default' ? opts.permissionMode : undefined,
+        permissionMode: opts.permissionMode,
         model: opts.model,
         resumeSessionId: opts.resumeSessionId,
         existingSessionId: opts.existingSessionId,

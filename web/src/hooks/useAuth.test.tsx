@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Mock the network layer so we can drive token refreshes deterministically.
 // The real ApiClient reads the live token via `getToken`, so the mock records the
@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from 'vitest'
 const h = vi.hoisted(() => {
     let idSeq = 0
     let authCount = 0
+    let authenticateImpl: (() => Promise<{ token: string; user: { id: string } }>) | null = null
     class MockApiClient {
         token: string
         options: { getToken?: () => string | null; onUnauthorized?: () => unknown; baseUrl?: string } | undefined
@@ -17,6 +18,7 @@ const h = vi.hoisted(() => {
             this.id = ++idSeq
         }
         async authenticate(): Promise<{ token: string; user: { id: string } }> {
+            if (authenticateImpl) return await authenticateImpl()
             authCount += 1
             return { token: `token-${authCount}`, user: { id: 'u1' } }
         }
@@ -30,7 +32,12 @@ const h = vi.hoisted(() => {
             this.code = code
         }
     }
-    return { MockApiClient, MockApiError }
+    return {
+        MockApiClient,
+        MockApiError,
+        setAuthenticateImpl(value: typeof authenticateImpl) { authenticateImpl = value },
+        reset() { idSeq = 0; authCount = 0; authenticateImpl = null },
+    }
 })
 
 vi.mock('@/api/client', () => ({ ApiClient: h.MockApiClient, ApiError: h.MockApiError }))
@@ -44,6 +51,11 @@ type ApiWithOptions = {
 }
 
 describe('useAuth — api identity stability across token refresh (issue #927)', () => {
+    beforeEach(() => {
+        h.reset()
+        sessionStorage.clear()
+    })
+
     it('keeps the same ApiClient instance when the token refreshes', async () => {
         // Stable authSource reference, exactly like the real caller (useAuthSource holds it in
         // useState). This isolates the bug under test: a *token* refresh, not a source change.
@@ -75,5 +87,24 @@ describe('useAuth — api identity stability across token refresh (issue #927)',
         // NOT re-run / remount. On current code `api` is rebuilt because `token` is a useMemo
         // dep, which drives the Voice-remount spam + per-image refetch storm. This fails today.
         expect(result.current.api).toBe(api1 as unknown as typeof result.current.api)
+    })
+
+    it('restores a valid cached hub session before background authentication completes', async () => {
+        const payload = btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }))
+        const jwt = `header.${payload}.signature`
+        const authSource = { type: 'accessToken' as const, token: 'seed' }
+        h.setAuthenticateImpl(async () => ({ token: jwt, user: { id: 'u1' } }))
+
+        const first = renderHook(() => useAuth(authSource, 'http://hub.test'))
+        await waitFor(() => expect(first.result.current.token).toBe(jwt))
+        first.unmount()
+
+        h.setAuthenticateImpl(() => new Promise(() => {}))
+        const restored = renderHook(() => useAuth(authSource, 'http://hub.test'))
+
+        expect(restored.result.current.token).toBe(jwt)
+        expect(restored.result.current.api).not.toBeNull()
+        expect(restored.result.current.isLoading).toBe(false)
+        restored.unmount()
     })
 })

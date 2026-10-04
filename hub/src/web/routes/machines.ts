@@ -6,6 +6,7 @@ import {
     SpawnSessionRequestSchema
 } from '@hapi/protocol'
 import { Hono } from 'hono'
+import { mergeCodexModels, readExtraCodexModels } from '../../config/codexExtraModels'
 import type { SyncEngine } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
 import { requireMachine } from './guards'
@@ -170,7 +171,8 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
 
         try {
             const result = await engine.listCodexModelsForMachine(machineId)
-            return c.json(result)
+            const models = mergeCodexModels(result.models, readExtraCodexModels())
+            return c.json({ ...result, models })
         } catch (error) {
             return c.json({
                 success: false,

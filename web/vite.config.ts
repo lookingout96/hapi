@@ -136,7 +136,11 @@ export default defineConfig({
                 }
             },
             injectManifest: {
-                globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}']
+                globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+                // The app shell currently includes the session/chat runtime in a
+                // ~2.8 MiB entry chunk. Keep it available locally so Android can
+                // cold-restore a discarded PWA without downloading the shell again.
+                maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
             },
             devOptions: {
                 enabled: true,

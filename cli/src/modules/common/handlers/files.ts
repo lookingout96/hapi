@@ -9,7 +9,7 @@ import { validatePath } from '../pathSecurity'
 import { getGeneratedImage } from '../generatedImages'
 import { getErrorMessage, rpcError } from '../rpcResponses'
 
-const MAX_FILE_READ_BYTES = 50 * 1024 * 1024
+const MAX_FILE_READ_BYTES = 30 * 1024 * 1024
 
 interface ReadFileRequest {
     path: string

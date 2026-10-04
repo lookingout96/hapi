@@ -10,7 +10,7 @@ function decodeBase64Buffer(content: string): ArrayBuffer {
     return bytes.buffer
 }
 
-const MAX_DOCX_PREVIEW_BYTES = 50 * 1024 * 1024
+const MAX_DOCX_PREVIEW_BYTES = 30 * 1024 * 1024
 
 export function DocxPreview(props: { content: string; fileName: string }) {
     const [html, setHtml] = useState<string | null>(null)

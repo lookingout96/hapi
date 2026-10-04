@@ -142,7 +142,7 @@ export function getPermissionModesForFlavor(flavor?: string | null): readonly Pe
         return []
     }
     if (flavor === 'hermes') {
-        return ['default']
+        return ['default', 'plan', 'yolo']
     }
     return CLAUDE_PERMISSION_MODES
 }
