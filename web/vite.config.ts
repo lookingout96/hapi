@@ -52,7 +52,13 @@ export default defineConfig({
     },
     server: {
         host: true,
-        allowedHosts: ['hapidev.weishu.me', 'REDACTED_LAN_IP', 'REDACTED_HOST', 'localhost'],
+        // Extra dev-server hostnames (LAN IP, personal domain) come from the environment so
+        // nothing machine-specific is committed: VITE_ALLOWED_HOSTS="host.a,host.b"
+        allowedHosts: [
+            'hapidev.weishu.me',
+            'localhost',
+            ...(process.env.VITE_ALLOWED_HOSTS ? process.env.VITE_ALLOWED_HOSTS.split(',').map((h) => h.trim()).filter(Boolean) : [])
+        ],
         proxy: {
             '/api': {
                 target: hubTarget,
